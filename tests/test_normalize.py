@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.normalize import (aggregate, build_dataset, check_sanity, kopecks_to_rub, money,
+from scripts.normalize import (aggregate, build_dataset, check_sanity, kopecks_to_rub, main, money,
                                stats_from, targeting_key)
 from scripts.raw_store import write_call
 
@@ -131,3 +131,71 @@ def test_empty_cabinet(tmp_path):
     cabinet(raw, [])
     ds = build_dataset(raw, "2026-09-01", "2026-09-30")
     assert ds["groups"] == [] and ds["totals"]["spent"] == 0.0 and check_sanity(ds) == []
+
+
+def test_money_rejects_nan_inf_bool():
+    for bad in (float("nan"), float("inf"), "nan", "inf", True, False):
+        with pytest.raises(ValueError):
+            money(bad)
+
+
+def test_reversed_period_raises(tmp_path):
+    raw = tmp_path / "raw"
+    cabinet(raw, [])
+    with pytest.raises(ValueError):
+        build_dataset(raw, "2026-09-30", "2026-09-01")
+
+
+def test_sanity_catches_ctr_units_in_daily_only(tmp_path):
+    """Путь A: только daily — проверка единиц должна работать и по строкам дней."""
+    raw = tmp_path / "raw"
+    rows = [{"date": "2026-09-01", **base(spent="100", shows=1000, clicks=10, ctr=1.0)}]  # 1.0 = «процент»
+    cabinet(raw, [{"id": 1, "name": "G1", "status": "active"}], daily={1: rows})
+    issues = check_sanity(build_dataset(raw, "2026-09-01", "2026-09-01", path="A"))
+    assert [(i["code"], i["entity"]) for i in issues] == [("ctr_units", "group:1@2026-09-01")]
+
+
+def _good_cabinet(raw):
+    cabinet(raw, [{"id": 1, "name": "G1", "status": "active"}],
+            summary={1: base(spent="100", shows=1000, clicks=10)})
+
+
+def _ws_run(ws, *extra):
+    return main(["--workspace", str(ws), "--date-from", "2026-09-01", "--date-to", "2026-09-30", *extra])
+
+
+def test_cli_good_cabinet_writes_dataset_only(tmp_path):
+    ws = tmp_path / "ws"
+    _good_cabinet(ws / "raw")
+    assert _ws_run(ws) == 0
+    assert (ws / "dataset.json").exists() and not (ws / "sanity.json").exists()
+
+
+def test_cli_sanity_failure_writes_sanity_only(tmp_path):
+    ws = tmp_path / "ws"
+    cabinet(ws / "raw", [{"id": 1, "name": "G1", "status": "active"}],
+            summary={1: base(spent="100", shows=10000, clicks=100, ctr=1.0)})
+    assert _ws_run(ws) == 3
+    assert (ws / "sanity.json").exists() and not (ws / "dataset.json").exists()
+
+
+def test_cli_passing_run_removes_stale_sanity(tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "sanity.json").write_text("[]", encoding="utf-8")
+    (ws / "dataset.json").write_text("{}", encoding="utf-8")
+    _good_cabinet(ws / "raw")
+    assert _ws_run(ws) == 0
+    assert not (ws / "sanity.json").exists()
+    assert (ws / "dataset.json").read_text(encoding="utf-8") != "{}"
+
+
+def test_cli_malformed_raw_exits_3_and_writes_nothing(tmp_path, capsys):
+    ws = tmp_path / "ws"
+    raw = ws / "raw"
+    write_call(raw, "vk_ads_campaigns_list", {"paginated": True}, {"items": []})
+    write_call(raw, "vk_ads_banners_list", {"campaign_id": 1}, [1, 2])  # response — список, а не объект
+    (ws / "dataset.json").write_text("{}", encoding="utf-8")  # старый результат должен исчезнуть
+    assert _ws_run(ws) == 3
+    assert not (ws / "dataset.json").exists() and not (ws / "sanity.json").exists()
+    assert "raw/ не разобран" in capsys.readouterr().out

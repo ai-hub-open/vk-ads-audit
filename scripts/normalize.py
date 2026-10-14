@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from datetime import date
 from pathlib import Path
@@ -34,13 +35,19 @@ NOT_TARGETING = ("fulltime",)
 def money(v) -> float:
     if v is None or v == "":
         return 0.0
+    if isinstance(v, bool):
+        raise ValueError(f"не число: {v!r}")
     if isinstance(v, (int, float)):
-        return float(v)
-    s = str(v).replace(" ", "").replace(" ", "").replace(",", ".")
-    try:
-        return float(s)
-    except ValueError:
-        raise ValueError(f"не число: {v!r}") from None
+        f = float(v)
+    else:
+        s = str(v).replace(" ", "").replace(" ", "").replace(",", ".")
+        try:
+            f = float(s)
+        except ValueError:
+            raise ValueError(f"не число: {v!r}") from None
+    if not math.isfinite(f):
+        raise ValueError(f"не число: {v!r}")
+    return f
 
 
 def kopecks_to_rub(v):
@@ -140,6 +147,9 @@ def _entity_stats(raw_dir: Path, tool: str, entity: str) -> dict:
 
 def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, path: str = "B") -> dict:
     raw_dir = Path(raw_dir)
+    d_from, d_to = date.fromisoformat(date_from), date.fromisoformat(date_to)
+    if d_to < d_from:
+        raise ValueError(f"дата окончания раньше начала: {date_from} > {date_to}")
     summary = _entity_stats(raw_dir, "vk_ads_statistics_summary", "campaigns")
     bsummary = _entity_stats(raw_dir, "vk_ads_statistics_summary", "banners")
     daily_raw = _entity_stats(raw_dir, "vk_ads_statistics_day", "campaigns")
@@ -189,7 +199,6 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
         return [{"id": x.get("id"), "name": x.get("name", "")} for x in items_of(raw_dir, tool)]
 
     live = [g["stats"] for g in groups if g["status"] != "deleted"]
-    d_from, d_to = date.fromisoformat(date_from), date.fromisoformat(date_to)
     return {
         "period": {"from": date_from, "to": date_to, "days": (d_to - d_from).days + 1},
         "target_cpa": target_cpa,
@@ -223,6 +232,8 @@ def check_sanity(ds: dict) -> list:
     banners = {b["id"]: b for b in ds["banners"]}
     for g in ds["groups"]:
         _check_stats(f"group:{g['id']}", g["stats"], out)
+        for d in g["daily"]:
+            _check_stats(f"group:{g['id']}@{d['date']}", d, out)
         bs = [banners[i]["stats"] for i in g["banner_ids"] if banners[i]["stats"]]
         if ds["coverage"]["summary"] and bs and len(bs) == len(g["banner_ids"]):
             total = sum(s["spent"] for s in bs)
@@ -244,12 +255,13 @@ def main(argv=None) -> int:
     parser.add_argument("--path", choices=["A", "B"], default="B")
     args = parser.parse_args(argv)
     ws = resolve_workspace(args.workspace)
+    for name in ("dataset.json", "sanity.json"):  # старый результат не должен пережить этот прогон
+        (ws / name).unlink(missing_ok=True)
     try:
         ds = build_dataset(ws / "raw", args.date_from, args.date_to, args.target_cpa, args.path)
-    except ValueError as e:
-        print(f"✗ {e}")
+    except (ValueError, KeyError, TypeError, AttributeError) as e:
+        print(f"✗ raw/ не разобран: {type(e).__name__}: {e}")
         return 3
-    (ws / "dataset.json").write_text(json.dumps(ds, ensure_ascii=False, indent=1), encoding="utf-8")
     issues = check_sanity(ds)
     if issues:
         (ws / "sanity.json").write_text(json.dumps(issues, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -257,6 +269,7 @@ def main(argv=None) -> int:
             print(f"✗ {i['code']} {i['entity']}: {i['detail']}")
         print("Проверка здравого смысла не пройдена — отчёт не строим, см. sanity.json")
         return 3
+    (ws / "dataset.json").write_text(json.dumps(ds, ensure_ascii=False, indent=1), encoding="utf-8")
     print(f"групп: {len(ds['groups'])}, объявлений: {len(ds['banners'])}, расход: {ds['totals']['spent']} ₽")
     return 0
 
