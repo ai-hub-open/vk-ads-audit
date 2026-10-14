@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import os
+
 import pytest
 
 from scripts import credentials
@@ -42,3 +45,36 @@ def test_cli_show_masks(capsys):
     assert credentials.main(["show"]) == 0
     out = capsys.readouterr().out
     assert URL not in out and "aihub.click.ru" in out
+
+
+@pytest.mark.parametrize("payload", ["[]", '"x"', '{"connection_url": 123}'])
+def test_wrong_shape_file_returns_none(payload):
+    path = credentials.cred_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(payload, encoding="utf-8")
+    assert credentials.get_connection_url() is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="на Windows права задаёт ACL профиля, chmod не работает")
+def test_file_not_group_or_world_readable():
+    path = credentials.set_connection_url(URL)
+    assert path.stat().st_mode & 0o077 == 0
+
+
+def test_cli_set_saves_and_does_not_print_url(capsys):
+    assert credentials.main(["set", "--url", URL]) == 0
+    out = capsys.readouterr().out
+    assert URL not in out and "aihub.click.ru" in out
+    assert json.loads(credentials.cred_path().read_text(encoding="utf-8")) == {"connection_url": URL}
+
+
+def test_cli_set_masks_stripped_value(capsys):
+    assert credentials.main(["set", "--url", f"  {URL}  "]) == 0
+    out = capsys.readouterr().out
+    assert credentials.mask(URL) in out
+    assert URL not in out
+
+
+def test_cli_set_invalid_returns_2_and_writes_nothing(capsys):
+    assert credentials.main(["set", "--url", "http://x.ru/c/1"]) == 2
+    assert not credentials.cred_path().exists()
