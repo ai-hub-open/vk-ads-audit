@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import sys
 from datetime import date
 from pathlib import Path
@@ -247,10 +248,49 @@ def check_sanity(ds: dict) -> list:
     return out
 
 
+def campaign_key(v) -> str:
+    """utm_campaign → ключ группы: int или строка, «150895042.0» → «150895042»."""
+    s = str(v).strip()
+    return s[:-2] if re.fullmatch(r"\d+\.0", s) else s
+
+
+def validate_metrika(m, period: dict | None = None) -> list:
+    """Строгая проверка metrika.json; пустой список — файл годен. Строки ошибок — по-русски."""
+    if not isinstance(m, dict):
+        return ["верхний уровень должен быть объектом {...}, а не " + type(m).__name__]
+    errs: list = []
+    if not isinstance(m.get("rows"), list):
+        errs.append("поле rows должно быть списком")
+    if not isinstance(m.get("utm_tagging"), bool):
+        errs.append("поле utm_tagging должно быть true или false")
+    for key, bound in (("date_from", "from"), ("date_to", "to")):
+        if key in m and period and m[key] != period.get(bound):
+            errs.append(f"metrika.json за другой период: {key}={m[key]}, аудит {period.get(bound)}")
+    for i, r in enumerate(m.get("rows") if isinstance(m.get("rows"), list) else [], 1):
+        if not isinstance(r, dict):
+            errs.append(f"строка {i}: должна быть объектом")
+            continue
+        c = r.get("utm_campaign")
+        if isinstance(c, bool) or not isinstance(c, (str, int)) or not campaign_key(c):
+            errs.append(f"строка {i}: utm_campaign должен быть id группы (строка или число)")
+        for k in ("visits", "goal_reaches"):
+            v = r.get(k)
+            if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+                errs.append(f"строка {i}: {k} должен быть целым неотрицательным числом")
+        b = r.get("bounce_rate")
+        if isinstance(b, bool) or not isinstance(b, (int, float)) or not (0 <= b <= 1):
+            if isinstance(b, (int, float)) and not isinstance(b, bool) and b > 1:
+                errs.append(f"строка {i}: bounce_rate {b} похоже на проценты — раздели на 100 (нужна доля 0..1)")
+            else:
+                errs.append(f"строка {i}: bounce_rate должен быть числом от 0 до 1")
+    return errs
+
+
 def merge_metrika(ds: dict, metrika: dict) -> dict:
     by_group: dict = {}
     for r in metrika.get("rows") or []:
-        acc = by_group.setdefault(str(r.get("utm_campaign", "")), {"visits": 0, "bounced": 0.0, "goal_reaches": 0})
+        acc = by_group.setdefault(campaign_key(r.get("utm_campaign", "")),
+                                  {"visits": 0, "bounced": 0.0, "goal_reaches": 0})
         v = int(r.get("visits") or 0)
         acc["visits"] += v
         acc["bounced"] += v * float(r.get("bounce_rate") or 0)
@@ -281,12 +321,22 @@ def main(argv=None) -> int:
         (ws / name).unlink(missing_ok=True)
     try:
         ds = build_dataset(ws / "raw", args.date_from, args.date_to, args.target_cpa, args.path)
-        metrika_path = ws / "metrika.json"
-        if metrika_path.is_file():
-            merge_metrika(ds, json.loads(metrika_path.read_text(encoding="utf-8")))
     except (ValueError, KeyError, TypeError, AttributeError) as e:
         print(f"✗ raw/ не разобран: {type(e).__name__}: {e}")
         return 3
+    metrika_path = ws / "metrika.json"
+    if metrika_path.is_file():
+        try:
+            metrika = json.loads(metrika_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            print(f"✗ metrika.json: не читается: {e}")
+            return 3
+        errs = validate_metrika(metrika, ds["period"])
+        if errs:
+            for e in errs:
+                print(f"✗ metrika.json: {e}")
+            return 3
+        merge_metrika(ds, metrika)
     issues = check_sanity(ds)
     if issues:
         (ws / "sanity.json").write_text(json.dumps(issues, ensure_ascii=False, indent=1), encoding="utf-8")

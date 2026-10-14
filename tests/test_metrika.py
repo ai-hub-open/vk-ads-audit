@@ -3,7 +3,7 @@ from __future__ import annotations
 from scripts.diagnose import diagnose, load_thresholds
 import json
 
-from scripts.normalize import merge_metrika
+from scripts.normalize import merge_metrika, validate_metrika
 from tests.helpers import make_banner, make_ds, make_group, stats
 from tests.test_normalize import _good_cabinet, _ws_run
 
@@ -78,3 +78,86 @@ def test_paused_group_gets_no_metrika_findings():
     merge_metrika(ds, metrika([{"utm_campaign": "1", "utm_content": "", "visits": 150,
                                 "bounce_rate": 0.9, "goal_reaches": 5}]))
     assert not {r for r, _ in rules(ds)} & {"high_bounce", "click_loss", "goals_without_vk_conversions"}
+
+
+PERIOD = {"from": "2026-09-01", "to": "2026-09-30"}
+
+
+def row(**kw):
+    r = {"utm_campaign": "1", "utm_content": "", "visits": 50, "bounce_rate": 0.4, "goal_reaches": 1}
+    r.update(kw)
+    return r
+
+
+def _errs(m, period=PERIOD):
+    return validate_metrika(m, period)
+
+
+def test_valid_metrika_has_no_errors():
+    assert _errs(metrika([row()])) == []
+
+
+def test_percent_bounce_rejected():
+    errs = _errs(metrika([row(bounce_rate=43)]))
+    assert any("проценты" in e for e in errs)
+
+
+def test_string_visits_rejected():
+    assert any("visits" in e for e in _errs({**metrika([row()]), "rows": [row(visits="50")]}))
+
+
+def test_missing_bounce_rate_rejected():
+    r = row()
+    del r["bounce_rate"]
+    assert any("bounce_rate" in e for e in _errs(metrika([r])))
+
+
+def test_top_level_list_rejected():
+    assert _errs([{"rows": []}])
+
+
+def test_period_mismatch_rejected():
+    errs = _errs({**metrika([row()]), "date_from": "2026-08-01", "date_to": "2026-08-31"})
+    assert any("за другой период" in e for e in errs)
+
+
+def test_period_match_accepted():
+    assert _errs({**metrika([row()]), "date_from": "2026-09-01", "date_to": "2026-09-30"}) == []
+
+
+def test_int_valued_string_campaign_matches_group():
+    ds = make_ds([make_group(150895042)])
+    merge_metrika(ds, metrika([row(utm_campaign="150895042.0", visits=120, bounce_rate=0.5)]))
+    assert ds["groups"][0]["metrika"]["visits"] == 120
+
+
+def _metrika_run(ws, body):
+    (ws / "metrika.json").write_text(body, encoding="utf-8")
+    return _ws_run(ws)
+
+
+def test_cli_invalid_json_exits_3_names_file(tmp_path, capsys):
+    ws = tmp_path / "ws"
+    _good_cabinet(ws / "raw")
+    (ws / "dataset.json").write_text("{}", encoding="utf-8")
+    assert _metrika_run(ws, "{not json") == 3
+    out = capsys.readouterr().out
+    assert "metrika.json" in out and "raw/" not in out
+    assert not (ws / "dataset.json").exists()
+
+
+def test_cli_percent_bounce_exits_3(tmp_path, capsys):
+    ws = tmp_path / "ws"
+    _good_cabinet(ws / "raw")
+    body = json.dumps(metrika([row(bounce_rate=43)]))
+    assert _metrika_run(ws, body) == 3
+    assert "проценты" in capsys.readouterr().out
+    assert not (ws / "dataset.json").exists()
+
+
+def test_cli_valid_metrika_exits_0_and_marks_coverage(tmp_path):
+    ws = tmp_path / "ws"
+    _good_cabinet(ws / "raw")
+    assert _metrika_run(ws, json.dumps(metrika([row()]))) == 0
+    ds = json.loads((ws / "dataset.json").read_text(encoding="utf-8"))
+    assert ds["coverage"]["metrika"] is True
