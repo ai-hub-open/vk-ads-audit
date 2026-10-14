@@ -32,9 +32,10 @@ Transport = Callable[[str, dict], dict]
 
 
 class McpError(Exception):
-    def __init__(self, message: str, status: Optional[int] = None):
+    def __init__(self, message: str, status: Optional[int] = None, *, retryable: bool = False):
         super().__init__(message)
         self.status = status
+        self.retryable = retryable
 
 
 class ForbiddenToolError(McpError):
@@ -60,11 +61,18 @@ def http_transport(url: str, payload: dict, timeout: float = 60.0) -> dict:
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return parse_body(resp.headers.get("Content-Type", ""), resp.read().decode("utf-8"))
+            raw = resp.read()
+            content_type = resp.headers.get("Content-Type", "")
     except urllib.error.HTTPError as e:
         raise McpError(f"HTTP {e.code}", status=e.code) from None
-    except urllib.error.URLError as e:
-        raise McpError(f"сервер MCP недоступен: {e.reason}") from None
+    except OSError as e:  # URLError, TimeoutError, ConnectionError и прочие сетевые сбои
+        # Причина может содержать адрес подключения — в сообщение идёт только имя типа.
+        raise McpError(f"сервер MCP недоступен: {type(e).__name__}", retryable=True) from None
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise McpError("сервер ответил не в UTF-8") from None
+    return parse_body(content_type, text)
 
 
 def _tool_error(tool: str, text: str) -> McpError:
@@ -77,7 +85,13 @@ def _tool_error(tool: str, text: str) -> McpError:
         status = obj.get("status") if isinstance(obj.get("status"), int) else None
         detail = obj.get("detail")
         if isinstance(detail, dict):
-            detail = (detail.get("error") or {}).get("message") or json.dumps(detail, ensure_ascii=False)
+            err = detail.get("error")
+            if isinstance(err, dict):
+                detail = err.get("message") or json.dumps(detail, ensure_ascii=False)
+            elif isinstance(err, str):
+                detail = err
+            else:
+                detail = json.dumps(detail, ensure_ascii=False)
         message = detail or text
     if status is None and "rate_limit" in text:
         status = 429
@@ -109,7 +123,7 @@ class McpClient:
                 raise
             except McpError as e:
                 attempt += 1
-                if e.status not in RETRY_STATUSES or attempt > self._retries:
+                if (e.status not in RETRY_STATUSES and not e.retryable) or attempt > self._retries:
                     raise
                 self._sleep(self._backoff * attempt)
 
@@ -122,7 +136,7 @@ class McpClient:
             err = resp["error"] or {}
             raise McpError(f"{tool}: JSON-RPC {err.get('code')}: {err.get('message')}")
         result = resp.get("result") or {}
-        text = "".join(c.get("text", "") for c in result.get("content", []) if c.get("type") == "text")
+        text = "".join(c.get("text", "") for c in (result.get("content") or []) if c.get("type") == "text")
         if result.get("isError"):
             raise _tool_error(tool, text)
         try:
@@ -138,10 +152,18 @@ class McpClient:
             args = dict(arguments or {})
             args.update(limit=page_size, offset=offset)
             page = self.call(tool, args)
-            batch = page.get("items", []) if isinstance(page, dict) else []
+            if not isinstance(page, dict) or not isinstance(page.get("items"), list):
+                raise McpError(f"{tool}: неожиданный формат страницы")
+            batch = page["items"]
             items.extend(batch)
             offset += len(batch)
-            count = page.get("count") if isinstance(page, dict) else None
-            if len(batch) < page_size or (isinstance(count, int) and offset >= count):
+            count = page.get("count")
+            if isinstance(count, int):
+                # Сервер может обрезать limit: короткая страница ещё не конец выборки.
+                if offset >= count:
+                    return items
+                if not batch:
+                    raise McpError(f"{tool}: сервер вернул пустую страницу при offset={offset} < count={count}")
+            elif len(batch) < page_size:
                 return items
         raise McpError(f"{tool}: больше {max_pages} страниц — сбор остановлен")

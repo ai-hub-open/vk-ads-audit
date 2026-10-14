@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import urllib.error
 
 import pytest
 
 from scripts.mcp_client import (ALLOWED_TOOLS, ForbiddenToolError, McpClient, McpError,
-                                parse_body)
+                                http_transport, parse_body)
 
 SECRET_URL = "https://vkads-mcp.aihub.click.ru/c/SECRET0123456789"
 
@@ -108,11 +109,127 @@ def test_paginate_without_count_stops_on_short_page():
     assert len(items) == 2 and len(transport.payloads) == 1
 
 
-def test_error_does_not_leak_url():
-    transport = FakeTransport(McpError("HTTP 401", status=401))
+def test_paginate_clamped_page_size_keeps_paging_until_count():
+    pages = [ok({"count": 250, "items": [{"id": i} for i in range(s, min(s + 100, 250))]})
+             for s in (0, 100, 200)]
+    transport = FakeTransport(*pages)
+    items = McpClient(SECRET_URL, transport=transport).paginate("vk_ads_banners_list")
+    assert [i["id"] for i in items] == list(range(250))
+    assert len(transport.payloads) == 3
+
+
+def test_paginate_empty_page_before_count_raises():
+    transport = FakeTransport(ok({"count": 250, "items": [{"id": 1}]}), ok({"count": 250, "items": []}))
+    with pytest.raises(McpError, match="пустую страницу при offset=1 < count=250"):
+        McpClient(SECRET_URL, transport=transport).paginate("vk_ads_banners_list")
+
+
+@pytest.mark.parametrize("page", [[1, 2], {"count": 2}, {"items": "x"}])
+def test_paginate_unexpected_shape_raises(page):
+    transport = FakeTransport(ok(page))
+    with pytest.raises(McpError, match="неожиданный формат страницы"):
+        McpClient(SECRET_URL, transport=transport).paginate("vk_ads_banners_list")
+
+
+EXPECTED_ALLOWED = {
+    "vk_ads_auth_check", "vk_ads_account_info", "vk_ads_accounts_list", "vk_ads_agency_clients_list",
+    "vk_ads_ad_plans_list", "vk_ads_ad_plans_get", "vk_ads_campaigns_list", "vk_ads_campaigns_get",
+    "vk_ads_ad_groups_list", "vk_ads_ad_groups_get", "vk_ads_banners_list", "vk_ads_banners_get",
+    "vk_ads_statistics_summary", "vk_ads_statistics_day", "vk_ads_remarketing_segments_list",
+    "vk_ads_remarketing_pixels_list", "vk_ads_users_lists_list", "vk_ads_packages_list",
+    "vk_ads_regions_search", "vk_ads_dictionary_get",
+}
+
+
+def test_allowed_tools_pinned():
+    assert ALLOWED_TOOLS == EXPECTED_ALLOWED
+
+
+class _FakeResp:
+    def __init__(self, body: bytes, ctype: str = "application/json"):
+        self.headers = {"Content-Type": ctype}
+        self._body = body
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _raise_from_urlopen(monkeypatch, exc):
+    def fake(req, timeout=None):
+        raise exc
+    monkeypatch.setattr("scripts.mcp_client.urllib.request.urlopen", fake)
+
+
+def test_http_error_does_not_leak_url(monkeypatch):
+    _raise_from_urlopen(monkeypatch, urllib.error.HTTPError(SECRET_URL, 401, "Unauthorized", {}, None))
     with pytest.raises(McpError) as exc:
-        McpClient(SECRET_URL, transport=transport).call("vk_ads_auth_check")
+        http_transport(SECRET_URL, {})
+    assert exc.value.status == 401
     assert "SECRET" not in str(exc.value)
+
+
+def test_urlerror_does_not_leak_url_and_is_retryable(monkeypatch):
+    _raise_from_urlopen(monkeypatch, urllib.error.URLError("boom " + SECRET_URL))
+    with pytest.raises(McpError) as exc:
+        http_transport(SECRET_URL, {})
+    assert exc.value.retryable is True
+    assert "SECRET" not in str(exc.value)
+
+
+def test_timeout_does_not_leak_url_and_is_retryable(monkeypatch):
+    _raise_from_urlopen(monkeypatch, TimeoutError("read " + SECRET_URL))
+    with pytest.raises(McpError) as exc:
+        http_transport(SECRET_URL, {})
+    assert exc.value.retryable is True
+    assert "SECRET" not in str(exc.value)
+
+
+def test_bad_utf8_body_is_mcp_error(monkeypatch):
+    monkeypatch.setattr("scripts.mcp_client.urllib.request.urlopen",
+                        lambda req, timeout=None: _FakeResp(b"\xff\xfe"))
+    with pytest.raises(McpError, match="UTF-8"):
+        http_transport(SECRET_URL, {})
+
+
+def test_retryable_transport_error_retried_once():
+    sleeps = []
+    transport = FakeTransport(McpError("сервер MCP недоступен: TimeoutError", retryable=True),
+                              ok({"ok": True}))
+    client = McpClient(SECRET_URL, transport=transport, sleep=sleeps.append)
+    assert client.call("vk_ads_auth_check") == {"ok": True}
+    assert sleeps == [2.0]
+
+
+def test_retryable_exhausted_raises_after_retries():
+    sleeps = []
+    transport = FakeTransport(*[McpError("сервер MCP недоступен: TimeoutError", retryable=True)
+                                 for _ in range(4)])
+    client = McpClient(SECRET_URL, transport=transport, sleep=sleeps.append)
+    with pytest.raises(McpError):
+        client.call("vk_ads_auth_check")
+    assert len(transport.payloads) == 4
+    assert sleeps == [2.0, 4.0, 6.0]
+
+
+def test_tool_error_detail_error_as_string():
+    transport = FakeTransport(tool_error({"error": True, "status": 500, "detail": {"error": "boom"}}))
+    client = McpClient(SECRET_URL, transport=transport, retries=0, sleep=lambda s: None)
+    with pytest.raises(McpError) as exc:
+        client.call("vk_ads_auth_check")
+    assert "boom" in str(exc.value)
+    assert exc.value.status == 500
+
+
+def test_null_content_is_mcp_error_not_crash():
+    transport = FakeTransport({"jsonrpc": "2.0", "id": 1, "result": {"content": None}})
+    with pytest.raises(McpError):
+        McpClient(SECRET_URL, transport=transport).call("vk_ads_auth_check")
 
 
 def test_parse_body_sse():
