@@ -3,7 +3,7 @@
   "active_statuses": ["active"],
   "min_daily_budget_rub": 300,
   "learning_budget_cpa_multiplier": 2,
-  "blocking_issue_codes": ["NO_MONEY", "AD_PLAN_STOPPED", "NO_BANNERS_WITH_ACTIVE_STATUS"],
+  "blocking_issue_codes": ["NO_MONEY", "AD_PLAN_STOPPED"],
   "rejected_moderation_statuses": ["banned", "rejected"],
   "autodelete_warn_days": 150,
   "max_active_banners_per_group": 8,

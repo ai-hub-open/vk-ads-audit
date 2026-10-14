@@ -210,7 +210,9 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
         "pixels": named("vk_ads_remarketing_pixels_list"),
         "totals": aggregate(live),
         "coverage": {"path": path, "banners": bool(read_calls(raw_dir, "vk_ads_banners_list")),
-                     "summary": bool(summary), "metrika": False},
+                     "summary": bool(summary), "stats": bool(summary or daily_raw),
+                     "pixels": bool(read_calls(raw_dir, "vk_ads_remarketing_pixels_list")),
+                     "metrika": False},
     }
 
 

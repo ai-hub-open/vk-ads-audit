@@ -30,7 +30,8 @@ def make_ds(groups, banners=(), **kw):
     ds = {"period": {"from": "2026-09-01", "to": "2026-09-30", "days": 30}, "target_cpa": None,
           "plans": [{"id": 7, "name": "План", "status": "active"}], "groups": list(groups),
           "banners": list(banners), "segments": [], "users_lists": [], "pixels": [{"id": 1, "name": "px"}],
-          "totals": stats(), "coverage": {"path": "B", "banners": True, "summary": True, "metrika": False}}
+          "totals": stats(), "coverage": {"path": "B", "banners": True, "summary": True, "stats": True,
+                                 "pixels": True, "metrika": False}}
     ds.update(kw)
     for g in ds["groups"]:
         if not g["banner_ids"]:

@@ -108,7 +108,7 @@ def rejected_banners(ds, th, ctx):
 def blocking_issues(ds, th, ctx):
     out = []
     for g in _live(ds):
-        codes = [c for c in g["issues"] if c in th["blocking_issue_codes"] and c != "NO_BANNERS_WITH_ACTIVE_STATUS"]
+        codes = [c for c in g["issues"] if c in th["blocking_issue_codes"]]
         if _active(g, th) and codes:
             out.append(finding("blocking_issues", "orange", "group", g, "VK сообщает, почему группа не крутится",
                                {"issues": codes}, "Устранить причину: " + ", ".join(codes)))
@@ -117,6 +117,8 @@ def blocking_issues(ds, th, ctx):
 
 @rule
 def autodelete_risk(ds, th, ctx):
+    if not ds["coverage"]["stats"]:  # статистики не собирали — «нет показов» было бы выдумкой
+        return []
     out = []
     end = date.fromisoformat(ds["period"]["to"])
     for g in _live(ds):
@@ -156,18 +158,18 @@ def low_budget(ds, th, ctx):
     out = []
     for g in _live(ds):
         b = g["budget_day_rub"]
-        if not _active(g, th) or b is None:
+        if not _active(g, th) or not b:  # None или 0 — дневного лимита нет, сравнивать не с чем
             continue
         if b < th["min_daily_budget_rub"]:
             out.append(finding("low_budget", "orange", "group", g, "Дневной бюджет ниже минимума VK",
                                {"budget_day_rub": b, "minimum_rub": th["min_daily_budget_rub"]},
                                f"Поднять дневной бюджет до {th['min_daily_budget_rub']} ₽ и выше"))
-        elif g["autobidding_mode"] and ds.get("target_cpa") and \
-                b < ds["target_cpa"] * th["learning_budget_cpa_multiplier"]:
-            need = ds["target_cpa"] * th["learning_budget_cpa_multiplier"]
+        elif g["autobidding_mode"] and ctx["ref_cpa"] is not None and \
+                b < ctx["ref_cpa"] * th["learning_budget_cpa_multiplier"]:
+            need = ctx["ref_cpa"] * th["learning_budget_cpa_multiplier"]
             out.append(finding("low_budget", "orange", "group", g,
                                "Бюджета не хватает на обучение автостратегии",
-                               {"budget_day_rub": b, "needed_rub": need},
+                               {"budget_day_rub": b, "needed_rub": need, "ref_source": ctx["ref_source"]},
                                f"Дневной бюджет не ниже {need:.0f} ₽ (≥ {th['learning_budget_cpa_multiplier']} × CPA)"))
     return out
 
@@ -198,7 +200,7 @@ def unused_segments(ds, th, ctx):
 
 @rule
 def no_pixel(ds, th, ctx):
-    if ds["pixels"] or not ds["coverage"]["banners"]:
+    if ds["pixels"] or not ds["coverage"]["pixels"]:  # пустой список при загруженном запросе — факт
         return []
     return [finding("no_pixel", "orange", "group", g, "Цель «конверсии на сайте», а пикселя в кабинете нет",
                     {"objective": g["objective"]}, "Установить пиксель VK и настроить события")
@@ -224,6 +226,9 @@ def main(argv=None) -> int:
     parser.add_argument("--thresholds")
     args = parser.parse_args(argv)
     ws = resolve_workspace(args.workspace)
+    if not (ws / "dataset.json").exists():
+        print("нет dataset.json — сначала нормализация (python -m scripts.normalize ...)", file=sys.stderr)
+        return 2
     ds = json.loads((ws / "dataset.json").read_text(encoding="utf-8"))
     result = diagnose(ds, load_thresholds(args.thresholds))
     (ws / "findings.json").write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")

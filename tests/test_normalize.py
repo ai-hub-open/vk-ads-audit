@@ -82,7 +82,8 @@ def test_build_dataset(tmp_path):
     assert g["budget_day_rub"] == 500.0 and g["issues"] == ["NO_MONEY"] and g["segment_ids"] == [55]
     assert g["banner_ids"] == [11] and ds["banners"][0]["group_id"] == 1
     assert ds["totals"]["spent"] == 900.0
-    assert ds["coverage"] == {"path": "B", "banners": True, "summary": True, "metrika": False}
+    assert ds["coverage"] == {"path": "B", "banners": True, "summary": True, "stats": True,
+                              "pixels": False, "metrika": False}
     assert check_sanity(ds) == []
 
 
