@@ -1,0 +1,10 @@
+__pycache__/
+.pytest_cache/
+*.pyc
+.env
+.mcp.json
+vk-audits/
+dist/
+*.skill
+*.zip
+.superpowers/
