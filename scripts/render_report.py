@@ -36,7 +36,7 @@ h1{font-size:22px;margin:0 0 4px}h2{font-size:17px;margin:28px 0 8px;border-bott
 .muted{color:#666}.tiles{display:flex;gap:12px;flex-wrap:wrap;margin:16px 0}
 .tile{border:1px solid #ddd;border-radius:8px;padding:10px 14px;min-width:120px}
 .tile b{display:block;font-size:18px}.f{border:1px solid #e3e3e3;border-radius:8px;padding:10px 14px;margin:8px 0}
-.f h3{font-size:15px;margin:0 0 4px}table{border-collapse:collapse;width:100%;font-size:13px}
+.f h3{font-size:15px;margin:0 0 4px}.f.explained{background:#f6f6f6;color:#555}.note{font-style:italic}table{border-collapse:collapse;width:100%;font-size:13px}
 td,th{border-bottom:1px solid #eee;padding:4px 6px;text-align:left}th{background:#fafafa}
 @media print{body{margin:0}.f{break-inside:avoid}}
 """
@@ -87,10 +87,13 @@ def limitations(ds: dict, collect_log=None) -> list:
 def _finding_html(f) -> str:
     ev = "".join(f"<tr><th>{escape(k)}</th><td>{_num(v)}</td></tr>" for k, v in f["evidence"].items())
     effect = f"<p>Эффект: <b>{fmt_rub(f['effect_rub'])}</b></p>" if f["effect_rub"] else ""
-    return (f'<div class="f"><h3>{escape(f["title"])}</h3>'
+    note = f.get("client_note")
+    note_html = f'<p class="note">Объяснено клиентом: {escape(note)}</p>' if isinstance(note, str) and note.strip() else ""
+    cls = "f explained" if note_html else "f"
+    return (f'<div class="{cls}"><h3>{escape(f["title"])}</h3>'
             f'<p class="muted">{escape(f["entity"]["type"])} {escape(str(f["entity"]["id"]))} · '
             f'{escape(f["entity"]["name"])} · надёжность: {CONF.get(f["confidence"], f["confidence"])}</p>'
-            f'<table>{ev}</table>{effect}<p>Действие: {escape(f["action"])}</p></div>')
+            f'<table>{ev}</table>{effect}<p>Действие: {escape(f["action"])}</p>{note_html}</div>')
 
 
 def render(ds: dict, findings: dict, collect_log=None, title: str = "") -> str:

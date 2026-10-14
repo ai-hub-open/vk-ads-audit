@@ -65,3 +65,18 @@ def test_empty_findings_message():
     ds = make_ds([make_group(1)], [make_banner(11, 1), make_banner(12, 1)])
     html = render(ds, {"ref_cpa": None, "ref_source": "none", "findings": []})
     assert "Существенных проблем не найдено" in html
+
+
+def test_client_note_rendered_escaped_and_marked():
+    ds, _ = sample()
+    fs = {"ref_cpa": None, "ref_source": "none", "findings": [
+        {"rule": "x", "level": "red", "entity": {"type": "group", "id": 1, "name": "g"}, "title": "T",
+         "evidence": {}, "effect_rub": 0, "confidence": "high", "action": "A",
+         "client_note": "тест <script>alert(1)</script>"},
+        {"rule": "y", "level": "red", "entity": {"type": "group", "id": 2, "name": "h"}, "title": "T2",
+         "evidence": {}, "effect_rub": 0, "confidence": "high", "action": "A"}]}
+    html = render(ds, fs)
+    assert "Объяснено клиентом: тест &lt;script&gt;" in html
+    assert "<script>alert" not in html
+    assert html.count('class="f explained"') == 1
+    assert html.count("Объяснено клиентом") == 1
