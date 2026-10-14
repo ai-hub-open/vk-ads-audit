@@ -7,6 +7,7 @@ mcp_client.py — клиент MCP VK Рекламы по HTTP (JSON-RPC tools/c
 """
 from __future__ import annotations
 
+import http.client
 import json
 import time
 import urllib.error
@@ -51,7 +52,8 @@ def parse_body(content_type: str, text: str) -> dict:
     try:
         return json.loads(text)
     except ValueError:
-        raise McpError(f"сервер ответил не JSON: {text[:200]}") from None
+        # Тело не печатаем: в нём могут быть данные кабинета или адрес подключения.
+        raise McpError(f"сервер ответил не JSON ({len(text.encode('utf-8'))} байт)") from None
 
 
 def http_transport(url: str, payload: dict, timeout: float = 60.0) -> dict:
@@ -65,6 +67,8 @@ def http_transport(url: str, payload: dict, timeout: float = 60.0) -> dict:
             content_type = resp.headers.get("Content-Type", "")
     except urllib.error.HTTPError as e:
         raise McpError(f"HTTP {e.code}", status=e.code) from None
+    except http.client.HTTPException as e:  # IncompleteRead, BadStatusLine и т. п. — не OSError
+        raise McpError(f"сервер MCP оборвал ответ: {type(e).__name__}", retryable=True) from None
     except OSError as e:  # URLError, TimeoutError, ConnectionError и прочие сетевые сбои
         # Причина может содержать адрес подключения — в сообщение идёт только имя типа.
         raise McpError(f"сервер MCP недоступен: {type(e).__name__}", retryable=True) from None
@@ -142,7 +146,7 @@ class McpClient:
         try:
             return json.loads(text)
         except ValueError:
-            raise McpError(f"{tool}: ответ не JSON: {text[:200]}") from None
+            raise McpError(f"{tool}: ответ не JSON") from None
 
     def paginate(self, tool: str, arguments: Optional[dict] = None, *,
                  page_size: int = 250, max_pages: int = 200) -> list:

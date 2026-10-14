@@ -65,6 +65,7 @@ def _num(v) -> str:
 def limitations(ds: dict, collect_log=None) -> list:
     lines = list(ALWAYS_LIMITATIONS)
     cov = ds["coverage"]
+    lines.extend(ds.get("notes") or [])
     if cov["path"] == "A":
         lines.append("Данные собраны через модель (путь A): объявления разобраны только у групп "
                      "с наибольшим расходом.")
@@ -72,6 +73,9 @@ def limitations(ds: dict, collect_log=None) -> list:
         lines.append("Объявления не собирались — выводы на уровне групп.")
     if not cov["metrika"]:
         lines.append("Метрика не подключена: поведение на сайте после клика не проверялось.")
+    elif not cov.get("metrika_utm", True):
+        lines.append("Метрика без UTM-разметки: склейка только на уровне всего трафика VK, "
+                     "правила по группам не применялись.")
     for c in (collect_log or {}).get("calls", []):
         if not c.get("ok"):
             lines.append(f"Не удалось получить {c['tool']}: {c.get('error')}")
@@ -96,6 +100,16 @@ def _finding_html(f) -> str:
             f'<table>{ev}</table>{effect}<p>Действие: {escape(f["action"])}</p>{note_html}</div>')
 
 
+def _metrika_total_html(total) -> str:
+    if not isinstance(total, dict):
+        return ""
+    bounce = total.get("bounce_rate")
+    parts = [f"визитов {_num(total.get('visits'))}",
+             f"отказы {fmt_pct(bounce * 100) if isinstance(bounce, (int, float)) else '—'}",
+             f"достижений целей {_num(total.get('goal_reaches'))}"]
+    return f"<p class='muted'>Метрика, весь трафик VK: {' · '.join(parts)}</p>"
+
+
 def render(ds: dict, findings: dict, collect_log=None, title: str = "") -> str:
     t = ds["totals"]
     tiles = [("Расход", fmt_rub(t["spent"])), ("Показы", _num(t["shows"])), ("Клики", _num(t["clicks"])),
@@ -109,6 +123,7 @@ def render(ds: dict, findings: dict, collect_log=None, title: str = "") -> str:
              f"<p class='muted'>Период {ds['period']['from']} — {ds['period']['to']} · путь {ds['coverage']['path']}"
              f" · опорный CPA: {fmt_rub(ref)} ({ref_note})</p>",
              "<div class='tiles'>" + "".join(f"<div class='tile'>{k}<b>{v}</b></div>" for k, v in tiles) + "</div>",
+             _metrika_total_html(ds.get("metrika_total")),
              "<h2>Находки</h2>"]
     if not findings["findings"]:
         parts.append("<p>Существенных проблем не найдено.</p>")

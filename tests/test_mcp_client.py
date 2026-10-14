@@ -239,3 +239,48 @@ def test_parse_body_sse():
 
 def test_parse_body_json():
     assert parse_body("application/json; charset=utf-8", '{"id": 2}') == {"id": 2}
+
+
+def test_http_exception_is_retryable_mcp_error(monkeypatch):
+    import http.client
+    _raise_from_urlopen(monkeypatch, http.client.BadStatusLine("garbage " + SECRET_URL))
+    with pytest.raises(McpError) as exc:
+        http_transport(SECRET_URL, {})
+    assert exc.value.retryable is True
+    assert "сервер MCP оборвал ответ: BadStatusLine" == str(exc.value)
+    assert "SECRET" not in str(exc.value)
+
+
+def test_incomplete_read_during_body_is_mcp_error(monkeypatch):
+    import http.client
+
+    class Broken:
+        headers = {"Content-Type": "application/json"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            raise http.client.IncompleteRead(b"abc")
+
+    monkeypatch.setattr("scripts.mcp_client.urllib.request.urlopen", lambda req, timeout=None: Broken())
+    with pytest.raises(McpError, match="оборвал ответ: IncompleteRead") as exc:
+        http_transport(SECRET_URL, {})
+    assert exc.value.retryable is True
+
+
+def test_non_json_body_not_echoed():
+    with pytest.raises(McpError) as exc:
+        parse_body("text/html", "<html>SECRET token=abc</html>")
+    assert "SECRET" not in str(exc.value) and "байт" in str(exc.value)
+
+
+def test_non_json_tool_text_not_echoed():
+    transport = FakeTransport({"jsonrpc": "2.0", "id": 1,
+                               "result": {"content": [{"type": "text", "text": "SECRET not json"}]}})
+    with pytest.raises(McpError) as exc:
+        McpClient(SECRET_URL, transport=transport).call("vk_ads_auth_check")
+    assert str(exc.value) == "vk_ads_auth_check: ответ не JSON"

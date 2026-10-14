@@ -80,3 +80,30 @@ def test_client_note_rendered_escaped_and_marked():
     assert "<script>alert" not in html
     assert html.count('class="f explained"') == 1
     assert html.count("Объяснено клиентом") == 1
+
+
+def test_notes_appended_to_limitations():
+    ds, _ = sample()
+    ds["notes"] = ["Объявления не собраны для 2 групп — по ним выводы на уровне группы."]
+    assert ds["notes"][0] in limitations(ds)
+
+
+def test_metrika_without_utm_limitation():
+    ds, _ = sample()
+    ds["coverage"].update(metrika=True, metrika_utm=False)
+    assert any("Метрика без UTM-разметки" in x for x in limitations(ds))
+    ds["coverage"]["metrika_utm"] = True
+    assert not any("Метрика без UTM-разметки" in x for x in limitations(ds))
+
+
+def test_metrika_total_block_rendered():
+    ds, fs = sample()
+    ds["coverage"].update(metrika=True, metrika_utm=False)
+    ds["metrika_total"] = {"visits": 1234, "bounce_rate": 0.456, "goal_reaches": 7}
+    html = render(ds, fs)
+    assert "Метрика, весь трафик VK" in html and "1 234" in html and "45.60 %" in html
+
+
+def test_no_metrika_total_block_without_data():
+    ds, fs = sample()
+    assert "Метрика, весь трафик VK" not in render(ds, fs)

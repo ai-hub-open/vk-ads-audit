@@ -31,10 +31,16 @@ def cred_path() -> Path:
     return Path.home() / ".vk-ads-audit" / "credentials.json"
 
 
+def _valid(url: str) -> str | None:
+    """Наружу не выходит ничего, кроме проверенной ссылки: битое значение — всё равно что его нет."""
+    url = url.strip()
+    return url if _URL_RE.match(url) else None
+
+
 def get_connection_url() -> str | None:
     env = os.environ.get(ENV_VAR, "").strip()
     if env:
-        return env
+        return _valid(env)
     path = cred_path()
     if not path.is_file():
         return None
@@ -47,7 +53,7 @@ def get_connection_url() -> str | None:
     raw = data.get("connection_url")
     if not isinstance(raw, str):
         return None
-    return raw.strip() or None
+    return _valid(raw)
 
 
 def set_connection_url(url: str) -> Path:

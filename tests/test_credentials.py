@@ -78,3 +78,17 @@ def test_cli_set_masks_stripped_value(capsys):
 def test_cli_set_invalid_returns_2_and_writes_nothing(capsys):
     assert credentials.main(["set", "--url", "http://x.ru/c/1"]) == 2
     assert not credentials.cred_path().exists()
+
+
+@pytest.mark.parametrize("bad", ["http://x.ru/c/1", "not a url", "https://localhost/c/1 extra"])
+def test_invalid_env_value_returns_none(monkeypatch, bad):
+    credentials.set_connection_url(URL)  # валидный файл не должен подменять битый env
+    monkeypatch.setenv("VK_ADS_CONNECTION_URL", bad)
+    assert credentials.get_connection_url() is None
+
+
+def test_invalid_file_value_returns_none():
+    path = credentials.cred_path()
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"connection_url": "http://insecure.example/c/1"}), encoding="utf-8")
+    assert credentials.get_connection_url() is None
