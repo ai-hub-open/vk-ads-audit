@@ -10,5 +10,19 @@
   "pixel_objectives": ["site_conversions"],
   "min_conversions_for_cpa": 5,
   "confidence_high_clicks": 300,
-  "confidence_medium_clicks": 100
+  "confidence_medium_clicks": 100,
+  "no_conv_spend_cpa_multiplier": 2,
+  "no_conv_min_spend_rub": 3000,
+  "cpa_over_ratio": 1.5,
+  "low_ctr_pct": 0.3,
+  "low_ctr_min_shows": 5000,
+  "burnout_ctr_drop": 0.3,
+  "burnout_min_frequency": 3,
+  "burnout_min_shows": 10000,
+  "learning_min_conversions_per_week": 10,
+  "concentration_share": 0.7,
+  "concentration_min_groups": 3,
+  "leader_cpa_ratio": 0.7,
+  "leader_budget_use": 0.9,
+  "leader_growth_share": 0.5
 }
