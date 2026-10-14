@@ -3,6 +3,7 @@
   "active_statuses": ["active"],
   "min_daily_budget_rub": 300,
   "learning_budget_cpa_multiplier": 2,
+  "auto_bidding_modes": ["max_goals"],
   "blocking_issue_codes": ["NO_MONEY", "AD_PLAN_STOPPED"],
   "rejected_moderation_statuses": ["banned", "rejected"],
   "autodelete_warn_days": 150,

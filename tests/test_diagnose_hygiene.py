@@ -71,6 +71,11 @@ def test_low_budget_for_learning_with_target():
     assert ("low_budget", 1) in rules(make_ds([g], healthy_banners(1), target_cpa=500))
 
 
+def test_manual_bidding_mode_has_no_learning_budget_finding():
+    g = make_group(1, autobidding_mode="fixed", budget_day_rub=500.0)
+    assert ("low_budget", 1) not in rules(make_ds([g], healthy_banners(1), target_cpa=500))
+
+
 def test_learning_budget_uses_median_when_no_target():
     gs = [make_group(1, autobidding_mode="max_goals", budget_day_rub=500.0,
                      stats=stats(spent=1000, clicks=100, conversions=10)),

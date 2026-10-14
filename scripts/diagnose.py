@@ -59,6 +59,15 @@ def _live(ds):
     return [g for g in ds["groups"] if g["status"] != "deleted"]
 
 
+def _is_auto(g, th) -> bool:
+    return g["autobidding_mode"] in th["auto_bidding_modes"]
+
+
+def _run_days(ds, g) -> int:
+    rows = g["daily"]
+    return sum(1 for r in rows if r["shows"] > 0) if rows else ds["period"]["days"]
+
+
 def reference_cpa(ds, th):
     if ds.get("target_cpa"):
         return float(ds["target_cpa"]), "target"
@@ -164,7 +173,7 @@ def low_budget(ds, th, ctx):
             out.append(finding("low_budget", "orange", "group", g, "Дневной бюджет ниже минимума VK",
                                {"budget_day_rub": b, "minimum_rub": th["min_daily_budget_rub"]},
                                f"Поднять дневной бюджет до {th['min_daily_budget_rub']} ₽ и выше"))
-        elif g["autobidding_mode"] and ctx["ref_cpa"] is not None and \
+        elif _is_auto(g, th) and ctx["ref_cpa"] is not None and \
                 b < ctx["ref_cpa"] * th["learning_budget_cpa_multiplier"]:
             need = ctx["ref_cpa"] * th["learning_budget_cpa_multiplier"]
             out.append(finding("low_budget", "orange", "group", g,
@@ -245,13 +254,16 @@ def cpa_above_target(ds, th, ctx):
 
 @rule
 def low_ctr(ds, th, ctx):
-    entities = [("banner", b, b["stats"]) for b in ds["banners"] if b["stats"] and b["status"] != "deleted"]
-    if not entities:
+    with_stats = [b for b in ds["banners"] if b["stats"] and b["status"] != "deleted"]
+    if with_stats:
+        live_ids = {g["id"] for g in _live(ds)}
+        entities = [("banner", b, b["stats"]) for b in with_stats if b["group_id"] in live_ids]
+    else:
         entities = [("group", g, g["stats"]) for g in _live(ds)]
     return [finding("low_ctr", "orange", etype, ent, "Низкий CTR при достаточных показах",
                     {"ctr_pct": s["ctr_pct"], "shows": s["shows"], "threshold_pct": th["low_ctr_pct"]},
                     "Заменить креатив или проверить, той ли аудитории он показывается",
-                    effect_rub=s["spent"], conf=confidence(s["shows"] // 100, th))
+                    effect_rub=s["spent"], conf=confidence(s["clicks"], th))
             for etype, ent, s in entities
             if s["shows"] >= th["low_ctr_min_shows"] and s["ctr_pct"] < th["low_ctr_pct"]]
 
@@ -270,6 +282,7 @@ def burnout(ds, th, ctx):
         if len(rows) < 4 or not freq or freq < th["burnout_min_frequency"] \
                 or g["stats"]["shows"] < th["burnout_min_shows"]:
             continue
+        rows = sorted(rows, key=lambda r: r["date"] or "")
         half = len(rows) // 2
         first, second = _ctr(rows[:half]), _ctr(rows[half:])
         if first and (first - second) / first >= th["burnout_ctr_drop"]:
@@ -283,17 +296,20 @@ def burnout(ds, th, ctx):
 
 @rule
 def learning_starved(ds, th, ctx):
-    weeks = max(ds["period"]["days"] / 7, 1)
     out = []
     for g in _live(ds):
         s = g["stats"]
+        if not _active(g, th) or not _is_auto(g, th) or s["spent"] <= 0:
+            continue
+        weeks = max(_run_days(ds, g) / 7, 1)
         per_week = s["conversions"] / weeks
-        if g["autobidding_mode"] and s["spent"] > 0 and per_week < th["learning_min_conversions_per_week"]:
+        if per_week < th["learning_min_conversions_per_week"]:
             out.append(finding("learning_starved", "orange", "group", g,
                                "Автостратегии не хватает конверсий для обучения",
                                {"conversions_per_week": round(per_week, 1),
                                 "needed": th["learning_min_conversions_per_week"]},
-                               "Объединить группы, расширить аудиторию или оптимизировать на более частое событие"))
+                               "Объединить группы, расширить аудиторию или оптимизировать на более частое событие",
+                               conf=confidence(s["clicks"], th)))
     return out
 
 
@@ -320,9 +336,12 @@ def scale_leader(ds, th, ctx):
     out = []
     for g in _live(ds):
         s, b = g["stats"], g["budget_day_rub"]
-        if not b or not g["daily"] or s["conversions"] < th["min_conversions_for_cpa"]:
+        if not _active(g, th) or not b or not g["daily"] or s["conversions"] < th["min_conversions_for_cpa"]:
             continue
-        avg = sum(r["spent"] for r in g["daily"]) / len(g["daily"])
+        spend_days = [r["spent"] for r in g["daily"] if r["spent"] > 0]
+        if not spend_days:
+            continue
+        avg = sum(spend_days) / len(spend_days)
         if s["cpa"] <= ref * th["leader_cpa_ratio"] and avg >= b * th["leader_budget_use"]:
             out.append(finding("scale_leader", "green", "group", g, "Лидер упирается в бюджет",
                                {"cpa": s["cpa"], "ref_cpa": ref, "avg_daily_spent": round(avg, 2),
