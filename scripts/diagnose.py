@@ -352,6 +352,47 @@ def scale_leader(ds, th, ctx):
     return out
 
 
+# ---------- метрика ----------
+
+def _with_metrika(ds, th):
+    return [g for g in _live(ds) if _active(g, th) and g.get("metrika")]
+
+
+@rule
+def high_bounce(ds, th, ctx):
+    return [finding("high_bounce", "orange", "group", g, "Высокий отказ трафика из группы (Метрика)",
+                    {"bounce_rate": g["metrika"]["bounce_rate"], "visits": g["metrika"]["visits"]},
+                    "Проверить соответствие посадочной обещанию креатива и скорость загрузки",
+                    effect_rub=g["stats"]["spent"] * g["metrika"]["bounce_rate"],
+                    conf=confidence(g["metrika"]["visits"], th))
+            for g in _with_metrika(ds, th)
+            if g["metrika"]["visits"] >= th["metrika_min_visits"]
+            and (g["metrika"]["bounce_rate"] or 0) >= th["high_bounce_rate"]]
+
+
+@rule
+def click_loss(ds, th, ctx):
+    out = []
+    for g in _with_metrika(ds, th):
+        clicks, visits = g["stats"]["clicks"], g["metrika"]["visits"]
+        if clicks >= th["click_loss_min_clicks"] and visits / clicks < th["click_loss_visit_ratio"]:
+            out.append(finding("click_loss", "orange", "group", g, "Кликов в VK заметно больше, чем визитов в Метрике",
+                               {"clicks": clicks, "visits": visits, "ratio": round(visits / clicks, 3)},
+                               "Проверить скорость посадочной, редиректы и разметку UTM",
+                               effect_rub=g["stats"]["spent"] * (1 - visits / clicks)))
+    return out
+
+
+@rule
+def goals_without_vk_conversions(ds, th, ctx):
+    return [finding("goals_without_vk_conversions", "orange", "group", g,
+                    "Цели в Метрике есть, а конверсий в VK нет — пиксель или атрибуция",
+                    {"metrika_goal_reaches": g["metrika"]["goal_reaches"], "vk_conversions": 0},
+                    "Проверить пиксель VK и событие оптимизации группы")
+            for g in _with_metrika(ds, th)
+            if g["metrika"]["goal_reaches"] > 0 and g["stats"]["conversions"] == 0]
+
+
 # ---------- запуск ----------
 
 def diagnose(ds: dict, th: dict) -> dict:

@@ -247,6 +247,26 @@ def check_sanity(ds: dict) -> list:
     return out
 
 
+def merge_metrika(ds: dict, metrika: dict) -> dict:
+    by_group: dict = {}
+    for r in metrika.get("rows") or []:
+        acc = by_group.setdefault(str(r.get("utm_campaign", "")), {"visits": 0, "bounced": 0.0, "goal_reaches": 0})
+        v = int(r.get("visits") or 0)
+        acc["visits"] += v
+        acc["bounced"] += v * float(r.get("bounce_rate") or 0)
+        acc["goal_reaches"] += int(r.get("goal_reaches") or 0)
+    for g in ds["groups"]:
+        acc = by_group.get(str(g["id"]))
+        g["metrika"] = None if not acc else {
+            "visits": acc["visits"],
+            "bounce_rate": round(acc["bounced"] / acc["visits"], 4) if acc["visits"] else None,
+            "goal_reaches": acc["goal_reaches"]}
+    ds["metrika_total"] = metrika.get("total")
+    ds["coverage"]["metrika"] = True
+    ds["coverage"]["metrika_utm"] = bool(metrika.get("utm_tagging"))
+    return ds
+
+
 def main(argv=None) -> int:
     setup_console()
     parser = argparse.ArgumentParser(description="raw/ → dataset.json")
@@ -261,6 +281,9 @@ def main(argv=None) -> int:
         (ws / name).unlink(missing_ok=True)
     try:
         ds = build_dataset(ws / "raw", args.date_from, args.date_to, args.target_cpa, args.path)
+        metrika_path = ws / "metrika.json"
+        if metrika_path.is_file():
+            merge_metrika(ds, json.loads(metrika_path.read_text(encoding="utf-8")))
     except (ValueError, KeyError, TypeError, AttributeError) as e:
         print(f"✗ raw/ не разобран: {type(e).__name__}: {e}")
         return 3

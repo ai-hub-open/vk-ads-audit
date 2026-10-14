@@ -25,5 +25,9 @@
   "concentration_min_groups": 3,
   "leader_cpa_ratio": 0.7,
   "leader_budget_use": 0.9,
-  "leader_growth_share": 0.5
+  "leader_growth_share": 0.5,
+  "metrika_min_visits": 100,
+  "high_bounce_rate": 0.6,
+  "click_loss_min_clicks": 200,
+  "click_loss_visit_ratio": 0.6
 }
