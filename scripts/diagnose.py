@@ -59,6 +59,21 @@ def _live(ds):
     return [g for g in ds["groups"] if g["status"] != "deleted"]
 
 
+def _measured(ds):
+    """Живые группы, по которым статистика получена: «нет данных» не равно «ноль»."""
+    return [g for g in _live(ds) if not g.get("stats_missing")]
+
+
+def _banner_groups(ds) -> set:
+    """Группы, у которых объявления реально собраны. Старый dataset без banner_groups — все живые."""
+    cov = ds["coverage"]
+    if not cov.get("banners"):
+        return set()
+    if "banner_groups" in cov:
+        return set(cov["banner_groups"])
+    return {g["id"] for g in _live(ds)}
+
+
 def _is_auto(g, th) -> bool:
     return g["autobidding_mode"] in th["auto_bidding_modes"]
 
@@ -71,7 +86,7 @@ def _run_days(ds, g) -> int:
 def reference_cpa(ds, th):
     if ds.get("target_cpa"):
         return float(ds["target_cpa"]), "target"
-    cpas = [g["stats"]["cpa"] for g in _live(ds)
+    cpas = [g["stats"]["cpa"] for g in _measured(ds)
             if g["stats"]["cpa"] is not None and g["stats"]["conversions"] >= th["min_conversions_for_cpa"]]
     if cpas:
         return round(float(statistics.median(cpas)), 2), "median"
@@ -87,11 +102,10 @@ def _banners_of(ds, g):
 
 @rule
 def no_active_banners(ds, th, ctx):
-    if not ds["coverage"]["banners"]:
-        return []
+    covered = _banner_groups(ds)
     out = []
     for g in _live(ds):
-        if not _active(g, th):
+        if not _active(g, th) or g["id"] not in covered:
             continue
         active = [b for b in _banners_of(ds, g) if b["status"] in th["active_statuses"]]
         if not active or "NO_BANNERS_WITH_ACTIVE_STATUS" in g["issues"]:
@@ -130,7 +144,7 @@ def autodelete_risk(ds, th, ctx):
         return []
     out = []
     end = date.fromisoformat(ds["period"]["to"])
-    for g in _live(ds):
+    for g in _measured(ds):
         if not g.get("created") or g["stats"]["shows"]:
             continue
         age = (end - datetime.strptime(g["created"][:10], "%Y-%m-%d").date()).days
@@ -144,11 +158,10 @@ def autodelete_risk(ds, th, ctx):
 
 @rule
 def banners_per_group(ds, th, ctx):
-    if not ds["coverage"]["banners"]:
-        return []
+    covered = _banner_groups(ds)
     out = []
     for g in _live(ds):
-        if not _active(g, th):
+        if not _active(g, th) or g["id"] not in covered:
             continue
         n = len([b for b in _banners_of(ds, g) if b["status"] in th["active_statuses"]])
         if n == 1:
@@ -223,7 +236,7 @@ def spend_no_conversions(ds, th, ctx):
     ref = ctx["ref_cpa"]
     limit = ref * th["no_conv_spend_cpa_multiplier"] if ref else th["no_conv_min_spend_rub"]
     out = []
-    for g in _live(ds):
+    for g in _measured(ds):
         s = g["stats"]
         if s["conversions"] == 0 and s["spent"] >= limit:
             out.append(finding("spend_no_conversions", "red", "group", g, "Расход без конверсий",
@@ -240,7 +253,7 @@ def cpa_above_target(ds, th, ctx):
     if not ref:
         return []
     out = []
-    for g in _live(ds):
+    for g in _measured(ds):
         s = g["stats"]
         if s["conversions"] >= th["min_conversions_for_cpa"] and s["cpa"] > ref * th["cpa_over_ratio"]:
             over = s["spent"] - s["conversions"] * ref
@@ -254,12 +267,13 @@ def cpa_above_target(ds, th, ctx):
 
 @rule
 def low_ctr(ds, th, ctx):
-    with_stats = [b for b in ds["banners"] if b["stats"] and b["status"] != "deleted"]
-    if with_stats:
-        live_ids = {g["id"] for g in _live(ds)}
-        entities = [("banner", b, b["stats"]) for b in with_stats if b["group_id"] in live_ids]
-    else:
-        entities = [("group", g, g["stats"]) for g in _live(ds)]
+    live_ids = {g["id"] for g in _live(ds)}
+    with_stats = [b for b in ds["banners"]
+                  if b["stats"] and b["status"] != "deleted" and b["group_id"] in live_ids
+                  and b["group_id"] in _banner_groups(ds)]
+    banner_level = {b["group_id"] for b in with_stats}
+    entities = [("banner", b, b["stats"]) for b in with_stats]
+    entities += [("group", g, g["stats"]) for g in _measured(ds) if g["id"] not in banner_level]
     return [finding("low_ctr", "orange", etype, ent, "Низкий CTR при достаточных показах",
                     {"ctr_pct": s["ctr_pct"], "shows": s["shows"], "threshold_pct": th["low_ctr_pct"]},
                     "Заменить креатив или проверить, той ли аудитории он показывается",
@@ -276,7 +290,7 @@ def _ctr(rows):
 @rule
 def burnout(ds, th, ctx):
     out = []
-    for g in _live(ds):
+    for g in _measured(ds):
         rows = g["daily"]
         freq = g["stats"]["frequency"]
         if len(rows) < 4 or not freq or freq < th["burnout_min_frequency"] \
@@ -297,7 +311,7 @@ def burnout(ds, th, ctx):
 @rule
 def learning_starved(ds, th, ctx):
     out = []
-    for g in _live(ds):
+    for g in _measured(ds):
         s = g["stats"]
         if not _active(g, th) or not _is_auto(g, th) or s["spent"] <= 0:
             continue
@@ -315,7 +329,7 @@ def learning_starved(ds, th, ctx):
 
 @rule
 def spend_concentration(ds, th, ctx):
-    live = [g for g in _live(ds) if g["stats"]["spent"] > 0]
+    live = [g for g in _measured(ds) if g["stats"]["spent"] > 0]
     total = sum(g["stats"]["spent"] for g in live)
     if len(live) < th["concentration_min_groups"] or not total:
         return []
@@ -334,7 +348,7 @@ def scale_leader(ds, th, ctx):
     if not ref:
         return []
     out = []
-    for g in _live(ds):
+    for g in _measured(ds):
         s, b = g["stats"], g["budget_day_rub"]
         if not _active(g, th) or not b or not g["daily"] or s["conversions"] < th["min_conversions_for_cpa"]:
             continue
@@ -355,7 +369,7 @@ def scale_leader(ds, th, ctx):
 # ---------- метрика ----------
 
 def _with_metrika(ds, th):
-    return [g for g in _live(ds) if _active(g, th) and g.get("metrika")]
+    return [g for g in _measured(ds) if _active(g, th) and g.get("metrika")]
 
 
 @rule

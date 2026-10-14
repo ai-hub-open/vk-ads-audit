@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from scripts.diagnose import diagnose, load_thresholds
+from scripts.diagnose import diagnose, load_thresholds, reference_cpa
 from tests.helpers import make_banner, make_ds, make_group, stats
 
 TH = load_thresholds()
@@ -194,3 +194,67 @@ def test_scale_leader_needs_daily_budget():
     for b in (0.0, None):
         g = make_group(1, budget_day_rub=b, daily=daily, stats=stats(28500, 150000, 1500, 90))
         assert ("scale_leader", 1) not in found(make_ds([g], banners(1), target_cpa=500))
+
+
+# ---------- покрытие объявлений и группы без статистики ----------
+
+def _partial(banner_groups):
+    groups = [make_group(1), make_group(2), make_group(3)]
+    ds = make_ds(groups, banners(1), coverage={"path": "A", "banners": True, "summary": True, "stats": True,
+                                               "pixels": True, "metrika": False,
+                                               "banner_groups": banner_groups})
+    return ds
+
+
+def test_no_active_banners_only_for_groups_with_banner_coverage():
+    ds = _partial([1, 2])  # группа 2 опрошена и пуста; группа 3 не опрошена вовсе
+    got = found(ds)
+    assert ("no_active_banners", 2) in got
+    assert ("no_active_banners", 3) not in got
+
+
+def test_banners_per_group_only_for_covered_groups():
+    ds = _partial([1])
+    ds["banners"] = [make_banner(21, 2)]
+    ds["groups"][1]["banner_ids"] = [21]
+    got = found(ds)
+    assert ("banners_per_group", 2) not in got  # группа 2 не в banner_groups
+    ds["coverage"]["banner_groups"] = [1, 2]
+    assert ("banners_per_group", 2) in found(ds)
+
+
+def test_low_ctr_group_level_for_groups_without_banner_coverage():
+    g1 = make_group(1, stats=stats(900, 10000, 20))
+    g2 = make_group(2, stats=stats(900, 10000, 20))
+    b = make_banner(11, 1, stats=stats(900, 10000, 20))
+    ds = make_ds([g1, g2], [b], coverage={"path": "A", "banners": True, "summary": True, "stats": True,
+                                           "pixels": True, "metrika": False, "banner_groups": [1]})
+    got = found(ds)
+    assert got[("low_ctr", 11)]["entity"]["type"] == "banner"
+    assert got[("low_ctr", 2)]["entity"]["type"] == "group"
+    assert ("low_ctr", 1) not in got
+
+
+def _missing_group(**kw):
+    return make_group(2, **{"stats": stats(), "stats_missing": True, **kw})
+
+
+def test_measured_excludes_stats_missing_from_reference_cpa():
+    good = make_group(1, stats=stats(1000, 10000, 100, 5))
+    fake = _missing_group(stats=stats(100, 10000, 100, 10))  # нули в датасете подменены, чтобы доказать фильтр
+    ds = make_ds([good, fake], banners(1) + banners(2))
+    assert reference_cpa(ds, TH) == (200.0, "median")
+
+
+def test_stats_missing_group_gets_no_performance_findings():
+    ds = make_ds([_missing_group()], banners(2), target_cpa=500)
+    got = found(ds)
+    assert not [k for k in got if k[1] == 2 and k[0] in (
+        "spend_no_conversions", "cpa_above_target", "low_ctr", "burnout", "learning_starved",
+        "spend_concentration", "scale_leader", "autodelete_risk")]
+
+
+def test_stats_missing_group_skipped_by_autodelete_and_learning():
+    g = _missing_group(created="2026-01-10 00:00:00", autobidding_mode="max_goals")
+    got = found(make_ds([g], banners(2)))
+    assert ("autodelete_risk", 2) not in got and ("learning_starved", 2) not in got

@@ -96,4 +96,13 @@ def empty(raw: Path) -> dict:
     return {**P, "target_cpa": None, "expected": set()}
 
 
-CABINETS = {"healthy": healthy, "leaking": leaking, "hygiene": hygiene, "empty": empty}
+def path_a_partial(raw: Path) -> dict:
+    """Путь A: объявления собраны только у 5 групп из 7 — у остальных двух нет ложного «нет объявлений»."""
+    groups = [group(i, [i]) for i in range(1, 8)]
+    per_day = {i: (500, 10000, 150, 2) for i in range(1, 8)}
+    write_cabinet(raw, groups, {i: banners(i) for i in range(1, 6)}, per_day)
+    return {**P, "target_cpa": 300.0, "expected": set()}
+
+
+CABINETS = {"healthy": healthy, "leaking": leaking, "hygiene": hygiene, "empty": empty,
+            "path_a_partial": path_a_partial}

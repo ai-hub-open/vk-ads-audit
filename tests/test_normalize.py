@@ -83,7 +83,7 @@ def test_build_dataset(tmp_path):
     assert g["banner_ids"] == [11] and ds["banners"][0]["group_id"] == 1
     assert ds["totals"]["spent"] == 900.0
     assert ds["coverage"] == {"path": "B", "banners": True, "summary": True, "stats": True,
-                              "pixels": False, "metrika": False}
+                              "pixels": False, "metrika": False, "banner_groups": [1]}
     assert check_sanity(ds) == []
 
 
@@ -102,7 +102,7 @@ def test_daily_used_when_no_summary(tmp_path):
     rows = [{"date": "2026-09-01", **base(spent="100", shows=1000, clicks=10, goals=1)},
             {"date": "2026-09-02", **base(spent="200", shows=1000, clicks=20, goals=1)}]
     cabinet(raw, [{"id": 1, "name": "G1", "status": "active"}], daily={1: rows})
-    ds = build_dataset(raw, "2026-09-01", "2026-09-02", path="A")
+    ds = build_dataset(raw, "2026-09-01", "2026-09-30", path="A")
     g = ds["groups"][0]
     assert [d["date"] for d in g["daily"]] == ["2026-09-01", "2026-09-02"]
     assert g["stats"]["spent"] == 300.0
@@ -121,8 +121,8 @@ def test_sanity_banners_vs_group(tmp_path):
     raw = tmp_path / "raw"
     cabinet(raw, [{"id": 1, "name": "G1", "status": "active"}],
             banners_by_group={1: [{"id": 11, "status": "active"}]},
-            summary={1: base(spent="1000", shows=1000, clicks=10)},
-            banner_summary={11: base(spent="500", shows=1000, clicks=10)})
+            summary={1: base(spent="500", shows=1000, clicks=10)},
+            banner_summary={11: base(spent="1000", shows=1000, clicks=10)})
     issues = check_sanity(build_dataset(raw, "2026-09-01", "2026-09-30"))
     assert "banners_vs_group" in [i["code"] for i in issues]
 
@@ -152,7 +152,7 @@ def test_sanity_catches_ctr_units_in_daily_only(tmp_path):
     raw = tmp_path / "raw"
     rows = [{"date": "2026-09-01", **base(spent="100", shows=1000, clicks=10, ctr=1.0)}]  # 1.0 = «процент»
     cabinet(raw, [{"id": 1, "name": "G1", "status": "active"}], daily={1: rows})
-    issues = check_sanity(build_dataset(raw, "2026-09-01", "2026-09-01", path="A"))
+    issues = check_sanity(build_dataset(raw, "2026-09-01", "2026-09-30", path="A"))
     assert [(i["code"], i["entity"]) for i in issues] == [("ctr_units", "group:1@2026-09-01")]
 
 
@@ -200,3 +200,176 @@ def test_cli_malformed_raw_exits_3_and_writes_nothing(tmp_path, capsys):
     assert _ws_run(ws) == 3
     assert not (ws / "dataset.json").exists() and not (ws / "sanity.json").exists()
     assert "raw/ не разобран" in capsys.readouterr().out
+
+
+# ---------- итоговая волна исправлений ----------
+
+def _active(gid, **kw):
+    return {"id": gid, "name": f"G{gid}", "status": "active", **kw}
+
+
+def _stat_call(raw, tool, entity, ids, items, **extra):
+    args = {"entity": entity, "ids": ",".join(map(str, ids)), **P, **extra}
+    write_call(raw, tool, args, {"items": items})
+
+
+def test_banner_groups_from_calls_and_banner_campaign_id(tmp_path):
+    raw = tmp_path / "raw"
+    cabinet(raw, [_active(1), _active(2), _active(3)], banners_by_group={1: [{"id": 11, "status": "active"}]})
+    write_call(raw, "vk_ads_banners_list", {"paginated": True}, {"items": [{"id": 21, "campaign_id": 2}]})
+    ds = build_dataset(raw, "2026-09-01", "2026-09-30")
+    assert ds["coverage"]["banner_groups"] == [1, 2]
+    assert ds["coverage"]["banners"] is True
+
+
+def test_note_when_banners_missing_for_active_groups(tmp_path):
+    raw = tmp_path / "raw"
+    cabinet(raw, [_active(1), _active(2), _active(3)], banners_by_group={1: [{"id": 11, "status": "active"}]})
+    ds = build_dataset(raw, "2026-09-01", "2026-09-30")
+    assert "Объявления не собраны для 2 групп — по ним выводы на уровне группы." in ds["notes"]
+
+
+def test_summary_missing_group_in_ids_is_zero(tmp_path):
+    raw = tmp_path / "raw"
+    cabinet(raw, [_active(1), _active(2)])
+    _stat_call(raw, "vk_ads_statistics_summary", "campaigns", [1, 2],
+               [{"id": 2, "total": base(spent="100", shows=1000, clicks=10)}])
+    g1, g2 = build_dataset(raw, "2026-09-01", "2026-09-30")["groups"]
+    assert g1["stats"]["spent"] == 0.0 and not g1.get("stats_missing")
+    assert g2["stats"]["spent"] == 100.0
+
+
+def test_group_not_covered_by_summary_uses_daily(tmp_path):
+    raw = tmp_path / "raw"
+    cabinet(raw, [_active(1), _active(2)])
+    _stat_call(raw, "vk_ads_statistics_summary", "campaigns", [1],
+               [{"id": 1, "total": base(spent="100", shows=1000, clicks=10)}])
+    rows = [{"date": "2026-09-01", **base(spent="70", shows=1000, clicks=10)}]
+    _stat_call(raw, "vk_ads_statistics_day", "campaigns", [2], [{"id": 2, "rows": rows}])
+    g1, g2 = build_dataset(raw, "2026-09-01", "2026-09-30")["groups"]
+    assert g2["stats"]["spent"] == 70.0 and not g2.get("stats_missing")
+
+
+def test_group_not_covered_anywhere_is_stats_missing(tmp_path):
+    raw = tmp_path / "raw"
+    cabinet(raw, [_active(1), _active(2), {"id": 3, "name": "G3", "status": "deleted"}])
+    _stat_call(raw, "vk_ads_statistics_summary", "campaigns", [1],
+               [{"id": 1, "total": base(spent="100", shows=1000, clicks=10)}])
+    ds = build_dataset(raw, "2026-09-01", "2026-09-30")
+    g2 = ds["groups"][1]
+    assert g2["stats_missing"] is True and g2["stats"]["spent"] == 0.0
+    assert "Статистика не получена для 1 групп — итоги и выводы по ним неполные." in ds["notes"]
+
+
+def test_sanity_summary_vs_daily(tmp_path):
+    raw = tmp_path / "raw"
+    cabinet(raw, [_active(1)])
+    _stat_call(raw, "vk_ads_statistics_summary", "campaigns", [1],
+               [{"id": 1, "total": base(spent="1000", shows=1000, clicks=10)}])
+    rows = [{"date": "2026-09-01", **base(spent="400", shows=1000, clicks=10)}]
+    _stat_call(raw, "vk_ads_statistics_day", "campaigns", [1], [{"id": 1, "rows": rows}])
+    issues = check_sanity(build_dataset(raw, "2026-09-01", "2026-09-30"))
+    assert "summary_vs_daily" in [i["code"] for i in issues]
+
+
+def test_identical_duplicate_listing_is_deduped(tmp_path):
+    raw = tmp_path / "raw"
+    cabinet(raw, [_active(1)], banners_by_group={1: [{"id": 11, "status": "active"}]})
+    write_call(raw, "vk_ads_campaigns_list", {"paginated": True}, {"items": [_active(1)]})
+    write_call(raw, "vk_ads_banners_list", {"campaign_id": 1}, {"items": [{"id": 11, "status": "active"}]})
+    write_call(raw, "vk_ads_remarketing_segments_list", {}, {"items": [{"id": 5, "name": "s"}]})
+    write_call(raw, "vk_ads_remarketing_segments_list", {}, {"items": [{"id": 5, "name": "s"}]})
+    ds = build_dataset(raw, "2026-09-01", "2026-09-30")
+    assert len(ds["groups"]) == 1 and len(ds["banners"]) == 1 and len(ds["segments"]) == 1
+    assert ds["groups"][0]["banner_ids"] == [11]
+
+
+def test_duplicate_statistics_items_deduped(tmp_path):
+    raw = tmp_path / "raw"
+    cabinet(raw, [_active(1)])
+    item = {"id": 1, "total": base(spent="100", shows=1000, clicks=10)}
+    _stat_call(raw, "vk_ads_statistics_summary", "campaigns", [1], [item])
+    _stat_call(raw, "vk_ads_statistics_summary", "campaigns", [1], [item])
+    assert build_dataset(raw, "2026-09-01", "2026-09-30")["totals"]["spent"] == 100.0
+
+
+@pytest.mark.parametrize("tool,items", [
+    ("vk_ads_campaigns_list", [_active(1), _active(1, name="другое")]),
+    ("vk_ads_ad_plans_list", [{"id": 7, "name": "a"}, {"id": 7, "name": "b"}]),
+    ("vk_ads_remarketing_pixels_list", [{"id": 7, "name": "a"}, {"id": 7, "name": "b"}]),
+])
+def test_conflicting_duplicates_raise(tmp_path, tool, items):
+    raw = tmp_path / "raw"
+    cabinet(raw, [])
+    write_call(raw, tool, {"paginated": True}, {"items": items})
+    with pytest.raises(ValueError, match=tool):
+        build_dataset(raw, "2026-09-01", "2026-09-30")
+
+
+def test_conflicting_banner_duplicates_raise(tmp_path):
+    raw = tmp_path / "raw"
+    cabinet(raw, [_active(1)], banners_by_group={1: [{"id": 11, "status": "active"}]})
+    write_call(raw, "vk_ads_banners_list", {"campaign_id": 1}, {"items": [{"id": 11, "status": "blocked"}]})
+    with pytest.raises(ValueError, match="vk_ads_banners_list.*11"):
+        build_dataset(raw, "2026-09-01", "2026-09-30")
+
+
+def test_conflicting_statistics_duplicates_raise(tmp_path):
+    raw = tmp_path / "raw"
+    cabinet(raw, [_active(1)])
+    _stat_call(raw, "vk_ads_statistics_summary", "campaigns", [1],
+               [{"id": 1, "total": base(spent="100", shows=1000, clicks=10)}])
+    _stat_call(raw, "vk_ads_statistics_summary", "campaigns", [1],
+               [{"id": 1, "total": base(spent="200", shows=1000, clicks=10)}])
+    with pytest.raises(ValueError, match="vk_ads_statistics_summary.*1"):
+        build_dataset(raw, "2026-09-01", "2026-09-30")
+
+
+def test_cli_conflicting_duplicates_exit_3(tmp_path, capsys):
+    ws = tmp_path / "ws"
+    cabinet(ws / "raw", [_active(1)])
+    write_call(ws / "raw", "vk_ads_campaigns_list", {}, {"items": [_active(1, name="x")]})
+    assert _ws_run(ws) == 3
+    assert "raw/ не разобран" in capsys.readouterr().out
+
+
+def test_sanity_banners_below_group_is_note_not_issue(tmp_path):
+    raw = tmp_path / "raw"
+    cabinet(raw, [_active(1)], banners_by_group={1: [{"id": 11, "status": "active"}]},
+            summary={1: base(spent="1000", shows=1000, clicks=10)},
+            banner_summary={11: base(spent="500", shows=1000, clicks=10)})
+    ds = build_dataset(raw, "2026-09-01", "2026-09-30")
+    assert check_sanity(ds) == []
+    assert any("Сумма по объявлениям меньше расхода группы 1" in n for n in ds["notes"])
+
+
+def test_sanity_banners_above_group_still_flagged(tmp_path):
+    raw = tmp_path / "raw"
+    cabinet(raw, [_active(1)], banners_by_group={1: [{"id": 11, "status": "active"}]},
+            summary={1: base(spent="500", shows=1000, clicks=10)},
+            banner_summary={11: base(spent="1000", shows=1000, clicks=10)})
+    assert "banners_vs_group" in [i["code"] for i in check_sanity(build_dataset(raw, "2026-09-01", "2026-09-30"))]
+
+
+def test_statistics_period_mismatch_raises(tmp_path):
+    raw = tmp_path / "raw"
+    cabinet(raw, [_active(1)])
+    write_call(raw, "vk_ads_statistics_summary",
+               {"entity": "campaigns", "ids": "1", "date_from": "2026-08-01", "date_to": "2026-08-31"},
+               {"items": []})
+    with pytest.raises(ValueError, match="период raw/"):
+        build_dataset(raw, "2026-09-01", "2026-09-30")
+
+
+def test_missing_vk_ctr_is_none_not_zero():
+    block = {"base": {"spent": "100", "shows": 10000, "clicks": 100, "goals": 0}}
+    assert stats_from(block, None)["vk_ctr_pct"] is None
+
+
+def test_null_names_become_empty(tmp_path):
+    raw = tmp_path / "raw"
+    cabinet(raw, [{"id": 1, "name": None, "status": "active"}],
+            banners_by_group={1: [{"id": 11, "name": None, "status": "active"}]})
+    write_call(raw, "vk_ads_remarketing_segments_list", {}, {"items": [{"id": 5, "name": None}]})
+    ds = build_dataset(raw, "2026-09-01", "2026-09-30")
+    assert ds["groups"][0]["name"] == "" and ds["banners"][0]["name"] == "" and ds["segments"][0]["name"] == ""

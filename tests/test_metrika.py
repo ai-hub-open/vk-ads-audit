@@ -161,3 +161,11 @@ def test_cli_valid_metrika_exits_0_and_marks_coverage(tmp_path):
     assert _metrika_run(ws, json.dumps(metrika([row()]))) == 0
     ds = json.loads((ws / "dataset.json").read_text(encoding="utf-8"))
     assert ds["coverage"]["metrika"] is True
+
+
+def test_metrika_rules_skip_stats_missing_groups():
+    g = make_group(1, stats=stats(), stats_missing=True)
+    ds = make_ds([g], banners(1))
+    merge_metrika(ds, metrika([{"utm_campaign": "1", "utm_content": "", "visits": 250,
+                                "bounce_rate": 0.9, "goal_reaches": 4}]))
+    assert not [r for r in rules(ds) if r[0] in ("high_bounce", "click_loss", "goals_without_vk_conversions")]

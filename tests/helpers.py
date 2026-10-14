@@ -33,6 +33,10 @@ def make_ds(groups, banners=(), **kw):
           "totals": stats(), "coverage": {"path": "B", "banners": True, "summary": True, "stats": True,
                                  "pixels": True, "metrika": False}}
     ds.update(kw)
+    cov = ds["coverage"]
+    if cov.get("banners") and "banner_groups" not in cov:
+        cov["banner_groups"] = [g["id"] for g in ds["groups"]]
+    ds.setdefault("notes", [])
     for g in ds["groups"]:
         if not g["banner_ids"]:
             g["banner_ids"] = [b["id"] for b in ds["banners"] if b["group_id"] == g["id"]]

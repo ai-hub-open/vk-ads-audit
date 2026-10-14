@@ -75,7 +75,7 @@ def stats_from(block, objective) -> dict:
         conv = int(b.get("goals") or 0)
     return {"spent": spent, "shows": shows, "clicks": clicks, "conversions": conv,
             **_ratios(spent, shows, clicks, conv),
-            "vk_ctr_pct": round(float(b.get("ctr") or 0) * 100, 4),
+            "vk_ctr_pct": None if b.get("ctr") in (None, "") else round(float(b["ctr"]) * 100, 4),
             "reach": int(u.get("reach") or 0), "frequency": float(u.get("frequency") or 0) or None}
 
 
@@ -136,14 +136,65 @@ def _response_items(call: dict) -> list:
     return items
 
 
-def _entity_stats(raw_dir: Path, tool: str, entity: str) -> dict:
-    out: dict = {}
-    for call in read_calls(raw_dir, tool):
-        if call["arguments"].get("entity") != entity:
+def _dedupe(tool: str, items: list) -> list:
+    """Один id — одна запись. Точные дубли (повторный файл списка) тихо отбрасываем, расхождение — ошибка."""
+    seen: dict = {}
+    out: list = []
+    for it in items:
+        key = it["id"]
+        if key in seen:
+            if seen[key] != it:
+                raise ValueError(f"{tool}: id {key} встречается дважды с разным содержимым — "
+                                 "в raw/ ответы разных прогонов или файл продублирован с правками")
             continue
-        for it in _response_items(call):
-            out[it["id"]] = it
+        seen[key] = it
+        out.append(it)
     return out
+
+
+def _list_items(raw_dir: Path, tool: str) -> list:
+    return _dedupe(tool, items_of(raw_dir, tool))
+
+
+def _id_list(v) -> list:
+    if isinstance(v, str):
+        v = v.split(",")
+    if not isinstance(v, (list, tuple)):
+        return []
+    out = []
+    for x in v:
+        x = str(x).strip()
+        if x:
+            out.append(int(x) if x.isdigit() else x)
+    return out
+
+
+def _gid(v):
+    s = str(v).strip() if v is not None else ""
+    return int(s) if s.isdigit() else v
+
+
+def _entity_stats(raw_dir: Path, tool: str, entity: str, period: tuple) -> tuple:
+    """(items по id, ids из аргументов вызовов, число вызовов). Период вызовов обязан совпасть с аудитом."""
+    out: dict = {}
+    covered: set = set()
+    calls = 0
+    for call in read_calls(raw_dir, tool):
+        args = call["arguments"]
+        if args.get("entity") != entity:
+            continue
+        calls += 1
+        got = (args.get("date_from"), args.get("date_to"))
+        if any(got) and got != period:
+            raise ValueError(f"период raw/ ({got[0]} — {got[1]}) не совпадает с "
+                             f"--date-from/--date-to ({period[0]} — {period[1]}): {tool}")
+        covered.update(_id_list(args.get("ids")))
+        for it in _response_items(call):
+            if it["id"] in out and out[it["id"]] != it:
+                raise ValueError(f"{tool}: id {it['id']} встречается дважды с разным содержимым")
+            out[it["id"]] = it
+            covered.add(it["id"])
+    return out, covered, calls
 
 
 def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, path: str = "B") -> dict:
@@ -151,29 +202,48 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
     d_from, d_to = date.fromisoformat(date_from), date.fromisoformat(date_to)
     if d_to < d_from:
         raise ValueError(f"дата окончания раньше начала: {date_from} > {date_to}")
-    summary = _entity_stats(raw_dir, "vk_ads_statistics_summary", "campaigns")
-    bsummary = _entity_stats(raw_dir, "vk_ads_statistics_summary", "banners")
-    daily_raw = _entity_stats(raw_dir, "vk_ads_statistics_day", "campaigns")
+    period = (date_from, date_to)
+    summary, summary_ids, summary_calls = _entity_stats(raw_dir, "vk_ads_statistics_summary", "campaigns", period)
+    bsummary, _, _ = _entity_stats(raw_dir, "vk_ads_statistics_summary", "banners", period)
+    daily_raw, _, daily_calls = _entity_stats(raw_dir, "vk_ads_statistics_day", "campaigns", period)
+    has_stats = bool(summary_calls or daily_calls)
+    notes: list = []
 
-    banners = []
-    for call in read_calls(raw_dir, "vk_ads_banners_list"):
+    banner_calls = read_calls(raw_dir, "vk_ads_banners_list")
+    banners: list = []
+    banner_groups: set = set()
+    seen_banners: dict = {}
+    for call in banner_calls:
         gid = call["arguments"].get("campaign_id")
+        if gid is not None:
+            banner_groups.add(_gid(gid))
         for b in _response_items(call):
+            if b["id"] in seen_banners:
+                if seen_banners[b["id"]] != b:
+                    raise ValueError(f"vk_ads_banners_list: id {b['id']} встречается дважды с разным содержимым")
+                continue
+            seen_banners[b["id"]] = b
+            if b.get("campaign_id") is not None:
+                banner_groups.add(_gid(b["campaign_id"]))
             banners.append({**b, "_group": b.get("campaign_id") or gid})
 
     objective_of: dict = {}
     groups = []
-    for g in items_of(raw_dir, "vk_ads_campaigns_list"):
+    for g in _list_items(raw_dir, "vk_ads_campaigns_list"):
         obj = g.get("objective")
         objective_of[g["id"]] = obj
         daily = [{"date": r.get("date"), **stats_from(r, obj)}
                  for r in (daily_raw.get(g["id"]) or {}).get("rows") or []]
-        if summary:
+        missing = False
+        if g["id"] in summary_ids:  # нет в items при покрытии вызовом — показов не было, это нули
             stats = stats_from((summary.get(g["id"]) or {}).get("total"), obj)
-        else:
+        elif daily:
             stats = aggregate(daily)
-        groups.append({
-            "id": g["id"], "name": g.get("name", ""), "status": g.get("status"), "objective": obj,
+        else:
+            stats = stats_from(None, obj)
+            missing = has_stats
+        group = {
+            "id": g["id"], "name": g.get("name") or "", "status": g.get("status"), "objective": obj,
             "package_id": g.get("package_id"), "ad_plan_id": g.get("ad_plan_id"),
             "delivery": g.get("delivery"), "autobidding_mode": g.get("autobidding_mode"),
             "budget_day_rub": kopecks_to_rub(g.get("budget_limit_day")),
@@ -183,35 +253,56 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
             "segment_ids": _segment_ids(g.get("targetings")),
             "stats": stats, "daily": daily,
             "banner_ids": [b["id"] for b in banners if b["_group"] == g["id"]],
-        })
+        }
+        if missing:
+            group["stats_missing"] = True
+        groups.append(group)
 
     banner_out = []
     for b in banners:
         st = bsummary.get(b["id"])
         banner_out.append({
-            "id": b["id"], "name": b.get("name", ""), "group_id": b["_group"], "status": b.get("status"),
+            "id": b["id"], "name": b.get("name") or "", "group_id": b["_group"], "status": b.get("status"),
             "moderation_status": b.get("moderation_status"), "moderation_reasons": b.get("moderation_reasons"),
             "issues": _codes(b.get("issues")),
             "can_remoderate": bool(b.get("user_can_request_remoderation")),
             "stats": stats_from(st.get("total"), objective_of.get(b["_group"])) if st else None,
         })
 
-    def named(tool):
-        return [{"id": x.get("id"), "name": x.get("name", "")} for x in items_of(raw_dir, tool)]
+    live_groups = [g for g in groups if g["status"] != "deleted"]
+    if banner_calls:
+        uncovered = [g for g in live_groups if g["status"] == "active" and g["id"] not in banner_groups]
+        if uncovered:
+            notes.append(f"Объявления не собраны для {len(uncovered)} групп — по ним выводы на уровне группы.")
+    absent = [g for g in live_groups if g.get("stats_missing")]
+    if absent:
+        notes.append(f"Статистика не получена для {len(absent)} групп — итоги и выводы по ним неполные.")
+    by_id = {b["id"]: b for b in banner_out}
+    for g in live_groups:
+        bs = [by_id[i]["stats"] for i in g["banner_ids"] if by_id[i]["stats"]]
+        if summary_calls and bs and len(bs) == len(g["banner_ids"]) and not g.get("stats_missing"):
+            total, spent = sum(s["spent"] for s in bs), g["stats"]["spent"]
+            if spent - total > max(1.0, 0.01 * spent):
+                notes.append(f"Сумма по объявлениям меньше расхода группы {g['id']} "
+                             "(часть объявлений удалена?)")
 
-    live = [g["stats"] for g in groups if g["status"] != "deleted"]
+    def named(tool):
+        return [{"id": x.get("id"), "name": x.get("name") or ""} for x in _list_items(raw_dir, tool)]
+
     return {
         "period": {"from": date_from, "to": date_to, "days": (d_to - d_from).days + 1},
         "target_cpa": target_cpa,
-        "plans": [{"id": p.get("id"), "name": p.get("name", ""), "status": p.get("status")}
-                  for p in items_of(raw_dir, "vk_ads_ad_plans_list")],
+        "plans": [{"id": p.get("id"), "name": p.get("name") or "", "status": p.get("status")}
+                  for p in _list_items(raw_dir, "vk_ads_ad_plans_list")],
         "groups": groups, "banners": banner_out,
         "segments": named("vk_ads_remarketing_segments_list"),
         "users_lists": named("vk_ads_users_lists_list"),
         "pixels": named("vk_ads_remarketing_pixels_list"),
-        "totals": aggregate(live),
-        "coverage": {"path": path, "banners": bool(read_calls(raw_dir, "vk_ads_banners_list")),
-                     "summary": bool(summary), "stats": bool(summary or daily_raw),
+        "totals": aggregate([g["stats"] for g in live_groups]),
+        "notes": notes,
+        "coverage": {"path": path, "banners": bool(banner_calls),
+                     "banner_groups": sorted(banner_groups, key=lambda x: (str(type(x)), x)),
+                     "summary": bool(summary_calls), "stats": has_stats,
                      "pixels": bool(read_calls(raw_dir, "vk_ads_remarketing_pixels_list")),
                      "metrika": False},
     }
@@ -240,9 +331,15 @@ def check_sanity(ds: dict) -> list:
         bs = [banners[i]["stats"] for i in g["banner_ids"] if banners[i]["stats"]]
         if ds["coverage"]["summary"] and bs and len(bs) == len(g["banner_ids"]):
             total = sum(s["spent"] for s in bs)
-            if abs(total - g["stats"]["spent"]) > max(1.0, 0.01 * g["stats"]["spent"]):
+            # Меньше группы — норма (часть объявлений удалена, см. notes); больше — единицы или данные кривые.
+            if total - g["stats"]["spent"] > max(1.0, 0.01 * g["stats"]["spent"]):
                 out.append({"code": "banners_vs_group", "entity": f"group:{g['id']}",
                             "detail": f"объявления {total} ₽, группа {g['stats']['spent']} ₽"})
+        if ds["coverage"]["summary"] and g["daily"] and not g.get("stats_missing"):
+            daily_total = round(sum(d["spent"] for d in g["daily"]), 2)
+            if abs(daily_total - g["stats"]["spent"]) > max(1.0, 0.01 * g["stats"]["spent"]):
+                out.append({"code": "summary_vs_daily", "entity": f"group:{g['id']}",
+                            "detail": f"сводка {g['stats']['spent']} ₽, по дням {daily_total} ₽"})
     for b in ds["banners"]:
         _check_stats(f"banner:{b['id']}", b["stats"], out)
     return out
