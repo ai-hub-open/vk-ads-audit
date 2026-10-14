@@ -65,3 +65,23 @@ def test_bundle_excludes_dev_and_secrets(tmp_path):
     assert "vk-ads-audit/references/thresholds.json" in names
     for bad in ("tests/", "evals/", "docs/", ".github/", ".claude-plugin/", ".env", "__pycache__", ".superpowers"):
         assert not any(bad in n for n in names), bad
+
+
+def _ref(name):
+    return (SKILL_ROOT / "references" / name).read_text(encoding="utf-8")
+
+
+def test_skill_covers_401_and_path_a_log_and_duplicates():
+    assert "HTTP 401" in SKILL and "credentials set" in SKILL and "переавторизовать" in SKILL
+    assert '"critical": false' in SKILL and "collect_log.json" in SKILL and '"ok": false' in SKILL
+    assert "но не оба" in SKILL
+
+
+def test_references_document_new_behaviour():
+    tools, lim, tpl, rules = (_ref("mcp-read-tools.md"), _ref("limitations.md"),
+                              _ref("report-template.md"), _ref("diagnostic-rules.md"))
+    assert "stateless" in tools and "Удалённые объявления" in tools
+    assert "Метрика без UTM-разметки" in lim and "Объявления не собраны для N групп" in lim
+    assert "Статистика не получена для N групп" in lim and "Сумма по объявлениям меньше" in lim
+    assert "client_note" in tpl and "Объяснено клиентом" in tpl
+    assert "banner_groups" in rules and "_measured" in rules and "stats_missing" in rules
