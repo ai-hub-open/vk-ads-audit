@@ -1,0 +1,14 @@
+{
+  "_source": "Черновик vk-ads-audit 0.1. Заменяется методичкой; смысл каждого числа — references/diagnostic-rules.md",
+  "active_statuses": ["active"],
+  "min_daily_budget_rub": 300,
+  "learning_budget_cpa_multiplier": 2,
+  "blocking_issue_codes": ["NO_MONEY", "AD_PLAN_STOPPED", "NO_BANNERS_WITH_ACTIVE_STATUS"],
+  "rejected_moderation_statuses": ["banned", "rejected"],
+  "autodelete_warn_days": 150,
+  "max_active_banners_per_group": 8,
+  "pixel_objectives": ["site_conversions"],
+  "min_conversions_for_cpa": 5,
+  "confidence_high_clicks": 300,
+  "confidence_medium_clicks": 100
+}
