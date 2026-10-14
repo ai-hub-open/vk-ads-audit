@@ -6,8 +6,10 @@ from datetime import date
 import pytest
 
 from scripts import collect as collect_mod
-from scripts.collect import STATS_CHUNK, clamp_date_to, collect
-from scripts.mcp_client import ALLOWED_TOOLS, McpError
+from scripts.collect import STATS_CHUNK, RawNotEmptyError, clamp_date_to, collect
+from scripts.mcp_client import ALLOWED_TOOLS, ForbiddenToolError, McpError
+
+URL = "https://vkads-mcp.aihub.click.ru/c/TOKEN123456789"
 
 
 class FakeClient:
@@ -37,12 +39,46 @@ class FakeClient:
         return {"items": [], "total": {}}
 
 
+class ForbidStats(FakeClient):
+    def call(self, tool, arguments=None):
+        if tool == "vk_ads_statistics_day":
+            self._check(tool, arguments)
+            raise ForbiddenToolError(f"{tool}: вне белого списка чтения")
+        return super().call(tool, arguments)
+
+
+class FailOneGroup(FakeClient):
+    def paginate(self, tool, arguments=None, **kw):
+        if tool == "vk_ads_banners_list" and arguments["campaign_id"] == 2:
+            self._check(tool, arguments)
+            raise McpError(f"{tool}: HTTP 500", status=500)
+        return super().paginate(tool, arguments, **kw)
+
+
+class LeakyClient(FakeClient):
+    """Ошибка, которая несёт адрес подключения: сбор обязан его скрыть."""
+
+    def __init__(self, url):
+        super().__init__(groups(1))
+        self.url = url
+
+    def call(self, tool, arguments=None):
+        if tool == "vk_ads_statistics_day":
+            self._check(tool, arguments)
+            raise McpError(f"{tool}: сбой при обращении к {self.url}")
+        return super().call(tool, arguments)
+
+
 def groups(n, deleted=()):
     return [{"id": i, "status": "deleted" if i in deleted else "active"} for i in range(1, n + 1)]
 
 
 def tools(client, name):
     return [a for t, a in client.calls if t == name]
+
+
+def read_log(ws):
+    return json.loads((ws / "collect_log.json").read_text(encoding="utf-8"))
 
 
 def test_deep_collects_everything(tmp_path):
@@ -97,14 +133,108 @@ def test_clamp_date_to():
     assert clamp_date_to("2026-10-01", today) == "2026-10-01"
 
 
-def test_cli_does_not_write_secret(tmp_path, monkeypatch):
+def test_second_run_into_same_raw_refused(tmp_path):
+    collect(FakeClient(groups(1)), tmp_path / "raw", "2026-09-01", "2026-09-30")
+    with pytest.raises(RawNotEmptyError):
+        collect(FakeClient(groups(1)), tmp_path / "raw", "2026-09-01", "2026-09-30")
+
+
+def test_cli_second_run_returns_4(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("VK_ADS_CONNECTION_URL", URL)
+    monkeypatch.setattr(collect_mod, "McpClient", lambda url, **kw: FakeClient(groups(1)))
+    argv = ["--workspace", str(tmp_path / "ws"), "--date-from", "2026-09-01", "--date-to", "2026-09-30"]
+    assert collect_mod.main(argv) == 0
+    assert collect_mod.main(argv) == 4
+    assert "уже содержит файлы" in capsys.readouterr().out
+
+
+def test_forbidden_tool_propagates_and_log_written(tmp_path):
+    with pytest.raises(ForbiddenToolError):
+        collect(ForbidStats(groups(1)), tmp_path / "raw", "2026-09-01", "2026-09-30")
+    assert read_log(tmp_path)["aborted"].startswith("ForbiddenToolError")
+
+
+def test_item_without_id_aborts_with_log(tmp_path):
+    with pytest.raises(KeyError):
+        collect(FakeClient([{"status": "active"}]), tmp_path / "raw", "2026-09-01", "2026-09-30")
+    assert read_log(tmp_path)["aborted"].startswith("KeyError")
+
+
+def test_failed_campaigns_list_is_critical(tmp_path):
+    log = collect(FakeClient(groups(2), fail_tools={"vk_ads_campaigns_list"}),
+                  tmp_path / "raw", "2026-09-01", "2026-09-30")
+    assert log["critical"] is True
+    entry = [c for c in log["calls"] if c["tool"] == "vk_ads_campaigns_list"][0]
+    assert entry["ok"] is False
+
+
+def test_cli_critical_returns_3(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("VK_ADS_CONNECTION_URL", URL)
+    monkeypatch.setattr(collect_mod, "McpClient",
+                        lambda url, **kw: FakeClient(groups(2), fail_tools={"vk_ads_campaigns_list"}))
+    rc = collect_mod.main(["--workspace", str(tmp_path / "ws"), "--date-from", "2026-09-01",
+                           "--date-to", "2026-09-30"])
+    assert rc == 3
+    assert "опись кабинета не собрана" in capsys.readouterr().out
+
+
+def test_failed_banners_of_one_group_continues(tmp_path, monkeypatch):
+    monkeypatch.setenv("VK_ADS_CONNECTION_URL", URL)
+    client = FailOneGroup(groups(2))
+    monkeypatch.setattr(collect_mod, "McpClient", lambda url, **kw: client)
+    rc = collect_mod.main(["--workspace", str(tmp_path / "ws"), "--date-from", "2026-09-01",
+                           "--date-to", "2026-09-30"])
+    assert rc == 0
+    assert [a["campaign_id"] for a in tools(client, "vk_ads_banners_list")] == [1, 2]
+    summary = [a for a in tools(client, "vk_ads_statistics_summary") if a["entity"] == "banners"]
+    assert summary[0]["ids"] == "100,101"
+    log = read_log(tmp_path / "ws")
+    assert log["errors"] == 1
+    assert log["critical"] is False
+
+
+def test_bad_mode_rejected(tmp_path):
+    with pytest.raises(ValueError):
+        collect(FakeClient(groups(1)), tmp_path / "raw", "2026-09-01", "2026-09-30", mode="full")
+
+
+def test_cli_bad_date_format_exit_2(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("VK_ADS_CONNECTION_URL", URL)
+    monkeypatch.setattr(collect_mod, "McpClient", lambda url, **kw: FakeClient(groups(1)))
+    rc = collect_mod.main(["--workspace", str(tmp_path / "ws"), "--date-from", "2026-13-01",
+                           "--date-to", "2026-09-30"])
+    assert rc == 2
+    assert "ГГГГ-ММ-ДД" in capsys.readouterr().out
+
+
+def test_cli_empty_period_after_clamp_exit_2(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("VK_ADS_CONNECTION_URL", URL)
+    monkeypatch.setattr(collect_mod, "McpClient", lambda url, **kw: FakeClient(groups(1)))
+    rc = collect_mod.main(["--workspace", str(tmp_path / "ws"), "--date-from", "2030-01-01",
+                           "--date-to", "2030-02-01"])
+    assert rc == 2
+    assert "период пуст" in capsys.readouterr().out
+
+
+def test_cli_does_not_write_secret(tmp_path, monkeypatch, capsys):
     secret = "https://vkads-mcp.aihub.click.ru/c/TOPSECRET999999"
     monkeypatch.setenv("VK_ADS_CONNECTION_URL", secret)
-    monkeypatch.setattr(collect_mod, "McpClient", lambda url, **kw: FakeClient(groups(1)))
+    seen = []
+
+    def factory(url, **kw):
+        seen.append(url)
+        return LeakyClient(url)
+
+    monkeypatch.setattr(collect_mod, "McpClient", factory)
     ws = tmp_path / "audit"
     rc = collect_mod.main(["--workspace", str(ws), "--date-from", "2026-09-01", "--date-to", "2026-09-30"])
     assert rc == 0
-    for path in ws.rglob("*.json"):
+    assert seen == [secret]
+    assert read_log(ws)["errors"] == 1
+    assert "TOPSECRET" not in capsys.readouterr().out
+    files = [p for p in ws.rglob("*") if p.is_file()]
+    assert files
+    for path in files:
         assert "TOPSECRET" not in path.read_text(encoding="utf-8")
 
 

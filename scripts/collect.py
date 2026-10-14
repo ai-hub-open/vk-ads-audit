@@ -6,6 +6,12 @@ collect.py — путь B: скрипт сам собирает кабинет �
 Только инструменты из белого списка mcp_client. Частичный сбой не останавливает
 сбор — он попадает в collect_log.json, а оттуда в ограничения отчёта.
 
+Коды выхода:
+  0 — сбор выполнен (возможно частично: сбои видны в collect_log.json, поле errors);
+  2 — путь B недоступен (нет ссылки или --probe провалился), неверные аргументы или период;
+  3 — критический сбой: не собрана опись кампаний (collect_log.json: critical);
+  4 — raw/ уже содержит файлы: нужна новая рабочая папка или очистка raw/.
+
     python -m scripts.collect --probe [--account-id ID]
     python -m scripts.collect --workspace <абс. путь> --date-from 2026-09-01 --date-to 2026-09-30 \
         [--account-id ID] [--mode deep|quick]
@@ -39,6 +45,11 @@ BANNER_FIELDS = ("id,name,campaign_id,status,moderation_status,moderation_reason
 STATS_CHUNK = 50
 METRICS = "all"
 LISTS = ("vk_ads_remarketing_segments_list", "vk_ads_users_lists_list", "vk_ads_remarketing_pixels_list")
+MODES = ("deep", "quick")
+
+
+class RawNotEmptyError(Exception):
+    """raw/ уже содержит файлы: повторный сбор в ту же папку удвоит данные."""
 
 
 def _chunks(ids: list, size: int):
@@ -52,13 +63,21 @@ def clamp_date_to(date_to: str, today: date) -> str:
 
 
 class _Collector:
-    def __init__(self, client, raw_dir: Path):
+    def __init__(self, client, raw_dir: Path, secrets=()):
         self.client = client
         self.raw_dir = Path(raw_dir)
         self.log: list = []
+        self._secrets = [s for s in secrets if s]
+
+    def clean(self, text: str) -> str:
+        # Ссылка подключения несёт креды: в журнал и на экран попадает только маска.
+        for s in self._secrets:
+            text = text.replace(s, mask(s))
+        return text
 
     def _record(self, tool, args, error=None):
-        self.log.append({"tool": tool, "arguments": args, "ok": error is None, "error": error})
+        self.log.append({"tool": tool, "arguments": args, "ok": error is None,
+                         "error": None if error is None else self.clean(error)})
 
     def call(self, tool: str, args: dict):
         try:
@@ -85,34 +104,49 @@ class _Collector:
         return items
 
 
-def collect(client, raw_dir: Path, date_from: str, date_to: str, mode: str = "deep") -> dict:
-    c = _Collector(client, raw_dir)
-    period = {"date_from": date_from, "date_to": date_to, "metrics": METRICS}
-    c.listing("vk_ads_ad_plans_list", {"fields": PLAN_FIELDS})
-    groups = c.listing("vk_ads_campaigns_list", {"fields": GROUP_FIELDS}) or []
-    live = [g["id"] for g in groups if g.get("status") != "deleted"]
-
-    banner_ids: list = []
-    if mode == "deep":
-        for gid in live:
-            banners = c.listing("vk_ads_banners_list", {"campaign_id": gid, "fields": BANNER_FIELDS}) or []
-            banner_ids += [b["id"] for b in banners if b.get("status") != "deleted"]
-        for tool in LISTS:
-            c.listing(tool, {})
-
-    for chunk in _chunks(live, STATS_CHUNK):
-        ids = ",".join(map(str, chunk))
-        if mode == "deep":
-            c.call("vk_ads_statistics_summary", {"entity": "campaigns", "ids": ids, **period})
-        c.call("vk_ads_statistics_day", {"entity": "campaigns", "ids": ids, **period})
-    for chunk in _chunks(banner_ids, STATS_CHUNK):
-        c.call("vk_ads_statistics_summary", {"entity": "banners", "ids": ",".join(map(str, chunk)), **period})
-
+def collect(client, raw_dir: Path, date_from: str, date_to: str, mode: str = "deep", *,
+            secrets=()) -> dict:
+    if mode not in MODES:
+        raise ValueError(f"режим должен быть deep или quick, а не {mode!r}")
+    raw_dir = Path(raw_dir)
+    if raw_dir.is_dir() and any(raw_dir.iterdir()):
+        raise RawNotEmptyError(f"{raw_dir} уже содержит файлы — повторный сбор удвоит данные. "
+                               "Укажи новую рабочую папку или удали содержимое raw/.")
+    c = _Collector(client, raw_dir, secrets)
     log = {"mode": mode, "date_from": date_from, "date_to": date_to, "calls": c.log,
-           "errors": sum(1 for x in c.log if not x["ok"])}
-    out = Path(raw_dir).parent / "collect_log.json"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(log, ensure_ascii=False, indent=1), encoding="utf-8")
+           "errors": 0, "critical": False}
+    out = raw_dir.parent / "collect_log.json"
+    try:
+        period = {"date_from": date_from, "date_to": date_to, "metrics": METRICS}
+        c.listing("vk_ads_ad_plans_list", {"fields": PLAN_FIELDS})
+        groups = c.listing("vk_ads_campaigns_list", {"fields": GROUP_FIELDS})
+        if groups is None:
+            log["critical"] = True
+            groups = []
+        live = [g["id"] for g in groups if g.get("status") != "deleted"]
+
+        banner_ids: list = []
+        if mode == "deep":
+            for gid in live:
+                banners = c.listing("vk_ads_banners_list", {"campaign_id": gid, "fields": BANNER_FIELDS}) or []
+                banner_ids += [b["id"] for b in banners if b.get("status") != "deleted"]
+            for tool in LISTS:
+                c.listing(tool, {})
+
+        for chunk in _chunks(live, STATS_CHUNK):
+            ids = ",".join(map(str, chunk))
+            if mode == "deep":
+                c.call("vk_ads_statistics_summary", {"entity": "campaigns", "ids": ids, **period})
+            c.call("vk_ads_statistics_day", {"entity": "campaigns", "ids": ids, **period})
+        for chunk in _chunks(banner_ids, STATS_CHUNK):
+            c.call("vk_ads_statistics_summary", {"entity": "banners", "ids": ",".join(map(str, chunk)), **period})
+    except BaseException as e:
+        log["aborted"] = c.clean(f"{type(e).__name__}: {e}")
+        raise
+    finally:
+        log["errors"] = sum(1 for x in c.log if not x["ok"])
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(log, ensure_ascii=False, indent=1), encoding="utf-8")
     return log
 
 
@@ -145,12 +179,28 @@ def main(argv=None) -> int:
 
     if not (args.workspace and args.date_from and args.date_to):
         parser.error("нужны --workspace, --date-from и --date-to")
+    try:
+        date_from = date.fromisoformat(args.date_from)
+        date.fromisoformat(args.date_to)
+    except ValueError:
+        print("✗ даты --date-from и --date-to задаются в формате ГГГГ-ММ-ДД")
+        return 2
     ws = resolve_workspace(args.workspace)
     date_to = clamp_date_to(args.date_to, date.today())
     if date_to != args.date_to:
         print(f"Период сдвинут на {date_to}: данные за сегодня неполные.")
-    log = collect(client, ws / "raw", args.date_from, date_to, mode=args.mode)
+    if date.fromisoformat(date_to) < date_from:
+        print(f"✗ период пуст: {args.date_from} — {date_to} (данные заканчиваются вчера)")
+        return 2
+    try:
+        log = collect(client, ws / "raw", args.date_from, date_to, mode=args.mode, secrets=(url,))
+    except RawNotEmptyError as e:
+        print(f"✗ {e}")
+        return 4
     print(f"вызовов: {len(log['calls'])}, с ошибками: {log['errors']} → {ws / 'collect_log.json'}")
+    if log["critical"]:
+        print("✗ опись кабинета не собрана: список кампаний не получен. См. collect_log.json.")
+        return 3
     return 0
 
 
