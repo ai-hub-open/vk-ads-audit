@@ -89,7 +89,7 @@ def test_references_document_new_behaviour():
 
 
 def test_every_rule_has_check():
-    assert {fn.__name__ for fn in RULES} - {"scale_leader"} <= set(CHECK_OF)
+    assert {fn.__name__ for fn in RULES} - {"scale_leader", "unused_segments"} <= set(CHECK_OF)   # гигиенические карточки без пункта чек-листа
 
 
 def test_check_ids_documented():

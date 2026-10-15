@@ -110,8 +110,15 @@ class _Collector:
         """Расширенный список fields; сервер мог его отвергнуть (McpError) — один повтор с базовым."""
         items = self.listing(tool, args)
         if items is None:
+            failed = len(self.log) - 1
             items = self.listing(tool, {**args, "fields": base_fields})
+            self.supersede(failed, items)
         return items
+
+    def supersede(self, index: int, retry_result):
+        """Упавший расширенный вызов, заменённый успешным базовым, — не отдельное ограничение отчёта."""
+        if retry_result is not None and 0 <= index < len(self.log) and not self.log[index]["ok"]:
+            self.log[index]["superseded"] = True
 
 
 def collect(client, raw_dir: Path, date_from: str, date_to: str, mode: str = "deep", *,
@@ -141,8 +148,10 @@ def collect(client, raw_dir: Path, date_from: str, date_to: str, mode: str = "de
             for gid in live:
                 banners = c.listing("vk_ads_banners_list", {"campaign_id": gid, "fields": banner_fields})
                 if banners is None and banner_fields != BANNER_FIELDS_BASE:
+                    failed = len(c.log) - 1
                     banner_fields = BANNER_FIELDS_BASE  # расширенные поля не приняты — дальше сразу базовые
                     banners = c.listing("vk_ads_banners_list", {"campaign_id": gid, "fields": banner_fields})
+                    c.supersede(failed, banners)
                 banners = banners or []
                 banner_ids += [b["id"] for b in banners if b.get("status") != "deleted"]
             for tool in LISTS:

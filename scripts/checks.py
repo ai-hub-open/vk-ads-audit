@@ -10,9 +10,9 @@ from __future__ import annotations
 from collections import defaultdict
 
 try:
-    from scripts.diagnose import _active, _banner_groups, _feat, _layer, _live, _run_days
+    from scripts.diagnose import _active, _banner_groups, _date, _feat, _layer, _live, _run_days
 except ImportError:  # запуск напрямую
-    from diagnose import _active, _banner_groups, _feat, _layer, _live, _run_days
+    from diagnose import _active, _banner_groups, _date, _feat, _layer, _live, _run_days
 
 BLOCKS = [("A", "Техническая настройка"), ("B", "Структура аккаунта"), ("C", "Таргетинг"),
           ("D", "Бюджет и стратегия"), ("E", "Объявления"), ("F", "Эффективность"),
@@ -98,7 +98,9 @@ def run_checks(ds: dict, th: dict, findings: list, evaluated: dict | None = None
     funnel_ok["retargeting"] = any(_layer(g) == "warm" for g in live)
     urls = [u.lower() for b in banners for u in b.get("urls") or []]
     for key, title in FUNNELS:
-        if key == "senler":
+        if not live:
+            present(f"B1.{key}", f"Воронка: {title}", False, ("na", "нет активных групп"))
+        elif key == "senler":
             gate = OK if urls else ("unknown", "ссылки объявлений не получены")
             present(f"B1.{key}", f"Воронка: {title}", any(m in u for m in th["senler_markers"] for u in urls), gate)
         else:
@@ -115,7 +117,9 @@ def run_checks(ds: dict, th: dict, findings: list, evaluated: dict | None = None
     by_rules("B9", "Расход распределён по группам", ["spend_concentration"], no_stats)
 
     # C
-    present("C1", "Регионы показа", any(_feat(g).get("regions") for g in live), targeting_gate)
+    present("C1", "Регионы показа",
+            any(_feat(g).get("regions") or "local_geo" in (_feat(g).get("keys") or []) for g in live),  # радиус — тоже гео
+            targeting_gate)
     present("C2", "Демография (пол, возраст)",
             any(_feat(g).get("age_span") is not None or len(_feat(g).get("sex") or []) == 1 for g in live),
             targeting_gate)
@@ -138,7 +142,16 @@ def run_checks(ds: dict, th: dict, findings: list, evaluated: dict | None = None
     lal_gate = ("na", "LAL-сегментов нет") if not lal else (
         OK if any(s.get("size") is not None for s in lal) else _unknown("размер LAL-сегмента"))
     by_rules("C13", "LAL от качественных баз", ["lal_small_source"], lal_gate)
-    by_rules("C14", "Базы обновляются и используются", ["stale_list", "unused_segments"])
+    lists = ds.get("users_lists") or []
+    if not lists:
+        c14_gate = ("na", "пользовательских баз нет")
+    elif not any(_date(u.get("updated")) for u in lists):
+        c14_gate = ("unknown", "даты обновления баз не получены")
+    elif not ds.get("segment_relations_known"):
+        c14_gate = ("unknown", "не удалось связать базы с таргетингом")
+    else:
+        c14_gate = OK
+    by_rules("C14", "Базы обновляются", ["stale_list"], c14_gate)
     by_rules("C15", "Автоматические места размещения", ["manual_placements"],
              _known_feature(live, "auto_placements", "места размещения"))
     adj_known = any(_feat(g).get(k) is not None for g in live for k in ("device_adjustments", "demo_adjustments"))

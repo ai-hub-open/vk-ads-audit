@@ -78,9 +78,12 @@ def limitations(ds: dict, collect_log=None, checklist=None) -> list:
     elif not cov.get("metrika_utm", True):
         lines.append("Метрика без UTM-разметки: склейка только на уровне всего трафика VK, "
                      "правила по группам не применялись.")
-    for c in (collect_log or {}).get("calls", []):
-        if not c.get("ok"):
+    calls = (collect_log or {}).get("calls", [])
+    for c in calls:
+        if not c.get("ok") and not c.get("superseded"):
             lines.append(f"Не удалось получить {c['tool']}: {c.get('error')}")
+    if any(c.get("superseded") for c in calls):
+        lines.append("Расширенные поля не приняты сервером — часть проверок (маркировка, UTM, кнопки) не проверена")
     if not cov.get("stats", True):
         lines.append("Статистика за период не собрана — выводы по расходу и результату недоступны.")
     if not cov.get("pixels", True):

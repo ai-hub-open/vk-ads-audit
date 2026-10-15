@@ -37,7 +37,7 @@ CHECK_OF = {
     "fragmentation": "B5", "no_cbo": "B6", "naming": "B7", "autodelete_risk": "B8", "spend_concentration": "B9",
     "no_minus_phrases": "C7", "kw_period": "C8", "kw_expand_off": "C9", "no_exclusions": "C10",
     "too_broad": "C11", "duplicate_targeting": "C12", "creative_overlap": "C12", "lal_small_source": "C13",
-    "stale_list": "C14", "unused_segments": "C14", "manual_placements": "C15",
+    "stale_list": "C14", "manual_placements": "C15",
     "low_budget": "D1", "cap_too_early": "D2", "learning_starved": "D3", "blocking_issues": "D4",
     "missing_ratios": "E1", "no_video": "E2", "banners_per_group": "E3", "no_active_banners": "E3",
     "stale_creatives": "E4", "no_cta_text": "E6", "generic_button": "E7", "rejected_banners": "E8",
@@ -300,7 +300,8 @@ def duplicate_targeting(ds, th, ctx):
 
 @rule
 def unused_segments(ds, th, ctx):
-    used = {i for g in _live(ds) for i in g["segment_ids"]}
+    # исключённый сегмент (минус-аудитория) тоже «используется»
+    used = {i for g in _live(ds) for i in list(g["segment_ids"]) + list(g.get("excluded_segment_ids") or [])}
     _seen(ctx, "unused_segments", len(ds["segments"]))
     return [finding("unused_segments", "white", "segment", s, "Сегмент не используется ни в одной группе",
                     {}, "Удалить или запустить на него группу")
@@ -336,8 +337,9 @@ def _site_url(u: str, th) -> bool:
 
 @rule
 def ord_missing(ds, th, ctx):
-    active = [b for b in ds["banners"] if b["status"] in th["active_statuses"]]
-    if not active or all(b.get("erid") is None for b in active):  # поле не получено — «не проверено»
+    # проверяем только объявления, у которых поле получено: erid None — «не проверено»
+    active = [b for b in ds["banners"] if b["status"] in th["active_statuses"] and b.get("erid") is not None]
+    if not active:
         return []
     _seen(ctx, "ord_missing", len(active))
     bad = [b for b in active if b.get("erid") == ""]
@@ -351,11 +353,11 @@ def ord_missing(ds, th, ctx):
 
 @rule
 def utm_missing(ds, th, ctx):
-    manual = {g["id"] for g in ds["groups"] if g.get("auto_utm") is False}  # None — не получено, молчим
-    site = [b for b in ds["banners"] if b["status"] in th["active_statuses"] and b["group_id"] in manual
+    known = {g["id"]: g["auto_utm"] for g in ds["groups"] if g.get("auto_utm") is not None}  # None — молчим
+    site = [b for b in ds["banners"] if b["status"] in th["active_statuses"] and b["group_id"] in known
             and any(_site_url(u, th) for u in b.get("urls") or [])]
-    _seen(ctx, "utm_missing", len(site))
-    bad = [b for b in site if not any("utm_" in u for u in b.get("urls") or [])]
+    _seen(ctx, "utm_missing", len(site))  # группы с авто-UTM проверены: метки им ставит VK
+    bad = [b for b in site if known[b["group_id"]] is False and not any("utm_" in u for u in b.get("urls") or [])]
     if not bad:
         return []
     return [finding("utm_missing", "orange", "account", ACCOUNT, "Ссылки на сайт без UTM-меток",
@@ -559,7 +561,7 @@ def too_broad(ds, th, ctx):
 
 @rule
 def creative_overlap(ds, th, ctx):
-    groups = {g["id"]: g for g in _live(ds) if _active(g, th)}
+    groups = {g["id"]: g for g in _live(ds) if _active(g, th) and _layer(g) is not None}  # без таргетингов — молчим
     by_content = defaultdict(set)
     for b in ds["banners"]:
         if b["status"] in th["active_statuses"] and b["group_id"] in groups:
@@ -592,18 +594,34 @@ def lal_small_source(ds, th, ctx):
             and s["size"] < th["lal_min_source"]]
 
 
+def _referenced_list_ids(ds, th):
+    """id баз, на которые ссылаются сегменты живых активных групп (цель или исключение);
+    None — связь «база → сегмент» в данных не получена."""
+    if not ds.get("segment_relations_known"):
+        return None
+    used = {i for g in _live(ds) if _active(g, th)
+            for i in list(g["segment_ids"]) + list(g.get("excluded_segment_ids") or [])}
+    return {lid for s in ds["segments"] if s["id"] in used for lid in (s.get("list_ids") or [])}
+
+
 @rule
 def stale_list(ds, th, ctx):
     end = date.fromisoformat(ds["period"]["to"])
+    referenced = _referenced_list_ids(ds, th)
     out = []
     for lst in ds["users_lists"]:
         d = _date(lst.get("updated"))
-        if d:
-            _seen(ctx, "stale_list")
-        if d and (end - d).days > th["list_stale_days"]:
-            out.append(finding("stale_list", "white", "list", lst, "База давно не обновлялась",
+        if not d or (referenced is not None and lst["id"] not in referenced):
+            continue  # даты нет или база не в таргетинге — устаревание ничему не вредит
+        _seen(ctx, "stale_list")
+        if (end - d).days > th["list_stale_days"]:
+            title = "База давно не обновлялась"
+            if referenced is None:
+                title += " (если база используется в таргетинге)"
+            out.append(finding("stale_list", "white", "list", lst, title,
                                {"days_since_update": (end - d).days},
-                               "Обновить базу или перейти на динамический ретаргетинг"))
+                               "Обновить базу или перейти на динамический ретаргетинг",
+                               conf="high" if referenced is not None else "low"))
     return out
 
 
@@ -621,6 +639,8 @@ def cap_too_early(ds, th, ctx):
     out = []
     for g in _measured(ds):
         if not _active(g, th) or not g.get("max_price_rub") or g["objective"] not in th["conversion_objectives"]:
+            continue
+        if _is_auto(g, th):  # при автостратегии «предельная цена» — не ручной кап
             continue
         w7 = (g.get("windows") or {}).get("7")
         if w7 is None:  # окно 7 дней не получено — без подмены периодом целиком
@@ -891,6 +911,8 @@ def learning_starved(ds, th, ctx):
     for g in _measured(ds):
         s = g["stats"]
         if not _active(g, th) or not _is_auto(g, th) or s["spent"] <= 0:
+            continue
+        if _early(ds, g, th):  # моложе 7 дней — обучение не оценивается
             continue
         _seen(ctx, "learning_starved")
         weeks = max(_run_days(ds, g) / 7, 1)

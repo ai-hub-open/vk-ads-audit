@@ -62,7 +62,8 @@ def test_layers():
     assert layer_of([101], segs) == "warm"
     assert layer_of([101, 102], segs) == "lal"
     assert is_lal(segs[103]) and not is_lal({"name": "Галактика"})
-    assert layer_of([999], segs) == "warm"   # сегмента нет в списке — считаем ретаргетом
+    assert layer_of([999], segs) is None   # сегмента нет в списке — слой неизвестен
+    assert layer_of([101, 999], segs) is None and layer_of([102, 999], segs) == "lal"
 
 
 def test_icons_do_not_count_as_ratios():

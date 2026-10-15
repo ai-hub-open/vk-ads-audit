@@ -39,7 +39,8 @@ def test_healthy_checklist_has_no_fails(tmp_path):
 def test_healthy_checklist_demonstrates_passes(tmp_path):
     cl = checklist_of("healthy", tmp_path)
     st = {c["id"]: c["status"] for b in cl["blocks"] for c in b["checks"]}
-    assert {k: st[k] for k in ("A2", "A3", "C10", "C13", "C15")} == dict.fromkeys(("A2", "A3", "C10", "C13", "C15"), "pass")
+    assert {k: st[k] for k in ("A2", "A3", "C10", "C13", "C14", "C15")} == dict.fromkeys(
+        ("A2", "A3", "C10", "C13", "C14", "C15"), "pass")
 
 
 def test_expert_checklist_mostly_fails(tmp_path):

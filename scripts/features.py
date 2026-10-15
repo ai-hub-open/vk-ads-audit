@@ -26,6 +26,10 @@ AUTO_UTM_KEYS = ("enable_utm", "auto_utm")                                      
 PLAN_BUDGET_KEYS = ("budget_limit", "budget_limit_day")                              # API? (кампания)
 SIZE_KEYS = ("size", "count", "entries_count", "audience_size")                      # API? (сегмент, база)
 UPDATED_KEYS = ("updated", "last_upload", "uploaded")                                # API? (база)
+SEGMENT_RELATION_KEYS = ("relations",)                                               # API? (сегмент → список связей)
+RELATION_TYPE_KEYS = ("object_type",)                                                # API? (элемент связи)
+RELATION_ID_KEYS = ("object_id",)                                                      # API? (элемент связи)
+USERS_LIST_TYPE_MARKERS = ("users_list", "user_list")                                # API? (тип объекта связи)
 RATIOS = {"1:1": 1.0, "4:5": 0.8, "16:9": 16 / 9, "9:16": 9 / 16}
 RATIO_TOL = 0.04
 _LAL_RE = re.compile(r"lookalike|look-alike|\blal\b|похож", re.I)
@@ -126,12 +130,29 @@ def is_lal(segment) -> bool:
     return bool(_LAL_RE.search(json.dumps(segment, ensure_ascii=False)))
 
 
-def layer_of(segment_ids, segments_by_id: dict) -> str:
+def layer_of(segment_ids, segments_by_id: dict):
+    """cold / warm / lal; None — сегмент не найден в списке сегментов (или список не собран): слой неизвестен."""
     if not segment_ids:
         return "cold"
     if any(sid in segments_by_id and is_lal(segments_by_id[sid]) for sid in segment_ids):
         return "lal"
+    if any(sid not in segments_by_id for sid in segment_ids):
+        return None
     return "warm"
+
+
+def users_list_ids(segment) -> list:
+    """id пользовательских баз, на которые ссылается сегмент (связи relations)."""
+    out: list = []
+    for rel_key in SEGMENT_RELATION_KEYS:
+        for rel in (segment.get(rel_key) or []) if isinstance(segment, dict) else []:
+            if not isinstance(rel, dict):
+                continue
+            kind = next((rel[k] for k in RELATION_TYPE_KEYS if isinstance(rel.get(k), str)), "")
+            oid = next((rel[k] for k in RELATION_ID_KEYS if rel.get(k) is not None), None)
+            if oid is not None and any(m in kind.lower() for m in USERS_LIST_TYPE_MARKERS):
+                out.append(oid)
+    return out
 
 
 def parse_dt(s):

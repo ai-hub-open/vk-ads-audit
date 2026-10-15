@@ -85,7 +85,9 @@ def healthy(raw: Path) -> dict:
     plans = [{"id": 1, "name": "ретарг_сайт_Мск", "budget_limit_day": 300000},
              {"id": 2, "name": "LAL_клиенты_Мск", "budget_limit_day": 300000},
              {"id": 3, "name": "холод_интересы_Мск", "budget_limit_day": 300000}]
-    segs = [{"id": 101, "name": "Посетители сайта 30 дней"}, {"id": 102, "name": "LAL на клиентов 3%", "size": 120}]
+    segs = [{"id": 101, "name": "Посетители сайта 30 дней"}, {"id": 102, "name": "LAL на клиентов 3%", "size": 120},
+            {"id": 601, "name": "Клиенты — исключение",
+             "relations": [{"object_type": "remarketing_users_list", "object_id": 601}]}]
     # исключение клиентов и ретаргета; места размещения — автоматические
     base_t = {"geo": {"regions": [1]}, "age": {"age_list": AGES}, "auto_placements": True}
     groups = [group(1, [1], ad_plan_id=1, name="ретарг_сайт_Мск_Ж25-45_моб",
@@ -161,7 +163,8 @@ def expert_1(raw: Path) -> dict:
     FREQ6.add(9)
     plans = [{"id": 1, "name": "Кампания 1", "budget_limit_day": 0},
              {"id": 2, "name": "Новая кампания", "budget_limit_day": 0}]
-    segs = [{"id": 501, "name": "LAL клиенты", "size": 20}]
+    segs = [{"id": 501, "name": "LAL клиенты", "size": 20,
+              "relations": [{"object_type": "remarketing_users_list", "object_id": 601}]}]
     users = [{"id": 601, "name": "Клиенты 2025", "entries_count": 300, "updated": "2026-01-15 00:00:00"}]
     kw_t = {"geo": {"regions": [5506]}, "keywords": ["купить велосипед"], "minus_phrases": [], "search_period": 30,
             "expand_keywords": False, "segments_exclude": [], "auto_placements": False}

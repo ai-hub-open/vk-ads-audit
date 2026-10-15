@@ -23,15 +23,17 @@ try:
     from scripts._console import setup_console
     from scripts._workspace import resolve_workspace
     from scripts.features import (AUTO_UTM_KEYS, ERID_KEYS, EXCLUDE_KEYS, PLAN_BUDGET_KEYS, SIZE_KEYS, UPDATED_KEYS,
-                                  banner_text, content_features, first_known, is_lal, layer_of,
-                                  observed_keys, parse_dt, targeting_features, url_strings)
+                                  SEGMENT_RELATION_KEYS, banner_text, content_features, first_known, is_lal,
+                                  layer_of, observed_keys, parse_dt, targeting_features, url_strings,
+                                  users_list_ids)
     from scripts.raw_store import items_of, read_calls
 except ImportError:  # запуск напрямую
     from _console import setup_console
     from _workspace import resolve_workspace
     from features import (AUTO_UTM_KEYS, ERID_KEYS, EXCLUDE_KEYS, PLAN_BUDGET_KEYS, SIZE_KEYS, UPDATED_KEYS,
-                          banner_text, content_features, first_known, is_lal, layer_of,
-                          observed_keys, parse_dt, targeting_features, url_strings)
+                          SEGMENT_RELATION_KEYS, banner_text, content_features, first_known, is_lal,
+                          layer_of, observed_keys, parse_dt, targeting_features, url_strings,
+                          users_list_ids)
     from raw_store import items_of, read_calls
 
 KOPECKS = 100
@@ -108,22 +110,24 @@ def targeting_key(t) -> str:
     return json.dumps(_canon(t), sort_keys=True, ensure_ascii=False)
 
 
-def _segment_ids(t) -> list:
+def _segment_ids(t, excluded: bool = False) -> list:
+    """id сегментов таргетинга; excluded=True — только исключённые (под EXCLUDE_KEYS), иначе только целевые."""
     found: set = set()
 
-    def walk(v, inside):
+    def walk(v, inside, under_exclude):
         if isinstance(v, dict):
             for k, x in v.items():
-                if k in EXCLUDE_KEYS:
+                is_exclude = k in EXCLUDE_KEYS
+                if is_exclude and not excluded:
                     continue
-                walk(x, inside or "segment" in k)
+                walk(x, inside or "segment" in k, under_exclude or is_exclude)
         elif isinstance(v, list):
             for x in v:
-                walk(x, inside)
-        elif inside and isinstance(v, int):
+                walk(x, inside, under_exclude)
+        elif inside and isinstance(v, int) and not isinstance(v, bool) and under_exclude == excluded:
             found.add(v)
 
-    walk(t or {}, False)
+    walk(t or {}, False, False)
     return sorted(found)
 
 
@@ -215,6 +219,25 @@ def _price(v):
     return p or None
 
 
+def _field_set(fields) -> set:
+    if isinstance(fields, str):
+        fields = fields.split(",")
+    return {str(f).strip() for f in fields} if isinstance(fields, (list, tuple)) else set()
+
+
+def _blind_ids(raw_dir: Path, tool: str, keys) -> set:
+    """id сущностей, полученных только вызовами, где `fields` задан и не содержит ни одного из keys:
+    значит, отсутствие поля у них — «не запрошено», а не «пусто». Вызов без `fields` отдаёт поля по умолчанию."""
+    blind: set = set()
+    sighted: set = set()
+    for call in read_calls(raw_dir, tool):
+        fields = call["arguments"].get("fields")
+        asked = fields is None or any(k in _field_set(fields) for k in keys)
+        ids = {it["id"] for it in _response_items(call) if isinstance(it, dict) and "id" in it}
+        (sighted if asked else blind).update(ids)
+    return blind - sighted
+
+
 def _auto_utm(g, observed):
     if not any(k in observed for k in AUTO_UTM_KEYS):
         return None
@@ -274,6 +297,8 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
     seg_items = _list_items(raw_dir, "vk_ads_remarketing_segments_list")
     segments_by_id = {s.get("id"): s for s in seg_items}
     observed_b = observed_keys(banners)
+    erid_blind = _blind_ids(raw_dir, "vk_ads_banners_list", ERID_KEYS)
+    utm_blind = _blind_ids(raw_dir, "vk_ads_campaigns_list", AUTO_UTM_KEYS)
 
     objective_of: dict = {}
     groups = []
@@ -299,11 +324,12 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
             "issues": _codes(g.get("issues")), "created": g.get("created"), "date_end": g.get("date_end"),
             "targeting_key": targeting_key(g.get("targetings")),
             "segment_ids": _segment_ids(g.get("targetings")),
+            "excluded_segment_ids": _segment_ids(g.get("targetings"), excluded=True),
             "stats": stats, "daily": daily,
             "features": targeting_features(g.get("targetings"), observed_t),
             "layer": layer_of(_segment_ids(g.get("targetings")), segments_by_id) if "targetings" in g else None,
             "max_price_rub": _price(g.get("max_price")),
-            "auto_utm": _auto_utm(g, observed_g),
+            "auto_utm": None if g["id"] in utm_blind else _auto_utm(g, observed_g),
             "windows": windows_of(daily, d_from, d_to),
             "banner_ids": [b["id"] for b in banners if b["_group"] == g["id"]],
         }
@@ -325,7 +351,7 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
             **content_features(b.get("content")),
             "created": b.get("created"), "updated": b.get("updated"),
             "age_days": (d_to - parse_dt(b["created"]).date()).days if parse_dt(b.get("created")) else None,
-            "erid": (None if not any(k in observed_b for k in ERID_KEYS)
+            "erid": (None if b["id"] in erid_blind or not any(k in observed_b for k in ERID_KEYS)
                      else str(first_known(b, ERID_KEYS, observed_b) or "")),
             "stats": stats_from(st.get("total"), objective_of.get(b["_group"])) if st else None,
         })
@@ -368,13 +394,16 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
         v = first_known(x, SIZE_KEYS, observed)
         return v if isinstance(v, int) and not isinstance(v, bool) else None
 
+    relations_known = any(k in observed_s for k in SEGMENT_RELATION_KEYS)
     return {
         "period": {"from": date_from, "to": date_to, "days": (d_to - d_from).days + 1},
         "target_cpa": target_cpa,
         "plans": [plan_out(p) for p in raw_plans],
         "groups": groups, "banners": banner_out,
         "segments": [{"id": s.get("id"), "name": s.get("name") or "", "lal": is_lal(s),
-                      "size": size_of(s, observed_s)} for s in seg_items],
+                      "size": size_of(s, observed_s),
+                      "list_ids": users_list_ids(s) if relations_known else None} for s in seg_items],
+        "segment_relations_known": relations_known,
         "users_lists": [{"id": u.get("id"), "name": u.get("name") or "", "size": size_of(u, observed_u),
                          "updated": first_known(u, UPDATED_KEYS, observed_u)} for u in users_items],
         "pixels": named("vk_ads_remarketing_pixels_list"),
