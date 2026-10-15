@@ -58,7 +58,7 @@
   "top_groups_spend_share": 0.8,
   "cta_words": ["запиш", "узна", "получ", "закаж", "купи", "оставь", "напиш", "скача", "звон", "подпиш", "перейд", "жми", "нажми", "выбер", "забер", "приход", "регистр", "попробу", "присоедин", "успей"],
   "generic_cta": ["learn_more", "more", "read_more", "подробнее"],
-  "internal_hosts": ["vk.com", "vk.ru", "vk.me", "ok.ru", "senler.ru"],
+  "internal_hosts": ["vk.com", "vk.ru", "vk.me", "vk.cc", "vk.link", "t.me", "max.ru", "ok.ru", "senler.ru"],
   "funnel_objectives": {"subscription": ["socialengagement", "socialengagement_profile", "vk_channel", "max_channel"], "leadform": ["leadads"], "site": ["site_conversions"]},
   "senler_markers": ["senler"],
   "metrika_min_visits": 100,

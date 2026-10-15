@@ -19,7 +19,7 @@ def test_ord_missing_only_when_field_known():
 def test_utm_missing():
     bs = [make_banner(11, 1, urls=["https://site.ru/"]), make_banner(12, 1, urls=["https://site.ru/?utm_source=vk"]),
           make_banner(13, 1, urls=["https://vk.com/club1"])]
-    f = found(make_ds([make_group(1)], bs), "utm_missing")[0]
+    f = found(make_ds([make_group(1, auto_utm=False)], bs), "utm_missing")[0]
     assert f["evidence"]["without_utm"] == 1 and f["evidence"]["site_banners"] == 2
 
 
@@ -79,3 +79,42 @@ def test_naming():
                    plans=[{"id": 7, "name": "ретаргет_Мск", "status": "active", "budget_day_rub": None,
                            "budget_total_rub": None, "has_budget": None}])
     assert found(good, "naming") == []
+
+
+def test_utm_missing_silent_when_auto_utm_unknown():
+    bs = [make_banner(11, 1, urls=["https://site.ru/"])]
+    assert found(make_ds([make_group(1, auto_utm=None)], bs), "utm_missing") == []
+
+
+def test_utm_host_parsing_and_internal_hosts():
+    bs = [make_banner(11, 1, urls=["https://vk.com?x=1"]), make_banner(12, 1, urls=["https://vk.com:443/x"]),
+          make_banner(13, 1, urls=["https://t.me/channel"]), make_banner(14, 1, urls=["https://site.ru:8080/?a=1"]),
+          make_banner(15, 1, urls=["https://me@site.ru/"])]
+    f = found(make_ds([make_group(1, auto_utm=False)], bs), "utm_missing")[0]
+    assert f["evidence"]["site_banners"] == 2 and f["evidence"]["without_utm"] == 2
+
+
+def test_unknown_layer_is_silent():
+    ds = make_ds([make_group(1, layer=None), make_group(2, layer=None, stats=stats(5000, 1000, 10))])
+    for rule in ("no_retargeting", "layer_missing", "layer_share", "mixed_plan"):
+        assert found(ds, rule) == [], rule
+
+
+def test_layer_share_ignores_unknown_layer_spend():
+    gs = [make_group(1, layer="warm", stats=stats(30000, 1000, 10)),
+          make_group(2, layer=None, stats=stats(30000, 1000, 10))]
+    assert found(make_ds(gs), "layer_share")[0]["evidence"]["actual"]["warm"] == 1.0
+
+
+def test_naming_ignores_empty_names():
+    plans = [{"id": 7, "name": "", "status": "active", "budget_day_rub": None, "budget_total_rub": None,
+              "has_budget": None}]
+    ds = make_ds([make_group(1, name="")], [make_banner(11, 1, name="   ")], plans=plans)
+    assert found(ds, "naming") == []
+
+
+def test_naming_share_over_non_empty_names_only():
+    ds = make_ds([make_group(1, name=""), make_group(2, name="Группа 2")],
+                 [make_banner(11, 1, name="видео_9x16_оффер")])
+    f = found(ds, "naming")[0]
+    assert f["evidence"]["default_names"] == 1 and f["evidence"]["total"] == 3

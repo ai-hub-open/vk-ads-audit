@@ -119,8 +119,8 @@ def _feat(g) -> dict:
     return g.get("features") or {}
 
 
-def _layer(g) -> str:
-    return g.get("layer") or "cold"
+def _layer(g):
+    return g.get("layer")  # None — слой не определён (targetings не получены)
 
 
 def _active_banners(ds, g, th) -> list:
@@ -281,7 +281,9 @@ def no_pixel(ds, th, ctx):
 def _site_url(u: str, th) -> bool:
     if not u.startswith("http"):
         return False
-    host = re.sub(r"^https?://", "", u).split("/")[0].lower()
+    rest = re.sub(r"^https?://", "", u)
+    host = re.split(r"[/?#]", rest, maxsplit=1)[0]   # путь, запрос, фрагмент
+    host = host.rsplit("@", 1)[-1].split(":", 1)[0].lower()  # учётные данные и порт
     return not any(host == h or host.endswith("." + h) for h in th["internal_hosts"])
 
 
@@ -301,11 +303,10 @@ def ord_missing(ds, th, ctx):
 
 @rule
 def utm_missing(ds, th, ctx):
-    auto = {g["id"] for g in ds["groups"] if g.get("auto_utm")}
-    site = [b for b in ds["banners"] if b["status"] in th["active_statuses"]
+    manual = {g["id"] for g in ds["groups"] if g.get("auto_utm") is False}  # None — не получено, молчим
+    site = [b for b in ds["banners"] if b["status"] in th["active_statuses"] and b["group_id"] in manual
             and any(_site_url(u, th) for u in b.get("urls") or [])]
-    bad = [b for b in site if b["group_id"] not in auto
-           and not any("utm_" in u for u in b.get("urls") or [])]
+    bad = [b for b in site if not any("utm_" in u for u in b.get("urls") or [])]
     if not bad:
         return []
     return [finding("utm_missing", "orange", "account", ACCOUNT, "Ссылки на сайт без UTM-меток",
@@ -315,7 +316,7 @@ def utm_missing(ds, th, ctx):
 
 @rule
 def no_retargeting(ds, th, ctx):
-    live = [g for g in _live(ds) if _active(g, th)]
+    live = [g for g in _live(ds) if _active(g, th) and _layer(g) is not None]
     if not live or any(_layer(g) == "warm" for g in live):
         return []
     return [finding("no_retargeting", "white", "account", ACCOUNT, "В кабинете нет ретаргетинга",
@@ -325,7 +326,7 @@ def no_retargeting(ds, th, ctx):
 
 @rule
 def layer_missing(ds, th, ctx):
-    live = [g for g in _live(ds) if _active(g, th)]
+    live = [g for g in _live(ds) if _active(g, th) and _layer(g) is not None]
     if not live:
         return []
     have = {_layer(g) for g in live}
@@ -341,7 +342,7 @@ def layer_missing(ds, th, ctx):
 
 @rule
 def layer_share(ds, th, ctx):
-    gs = [g for g in _measured(ds) if g["stats"]["spent"] > 0]
+    gs = [g for g in _measured(ds) if g["stats"]["spent"] > 0 and _layer(g) is not None]
     total = sum(g["stats"]["spent"] for g in gs)
     if not total:
         return []
@@ -367,7 +368,7 @@ def layer_share(ds, th, ctx):
 def mixed_plan(ds, th, ctx):
     by_plan = defaultdict(set)
     for g in _live(ds):
-        if _active(g, th) and g.get("ad_plan_id") is not None:
+        if _active(g, th) and g.get("ad_plan_id") is not None and _layer(g) is not None:
             by_plan[g["ad_plan_id"]].add(_layer(g))
     plans = {p["id"]: p for p in ds["plans"]}
     return [finding("mixed_plan", "white", "plan", plans.get(pid, {"id": pid, "name": ""}),
@@ -406,9 +407,10 @@ def naming(ds, th, ctx):
     names = ([p["name"] for p in ds["plans"] if p.get("status") != "deleted"]
              + [g["name"] for g in _live(ds)]
              + [b["name"] for b in ds["banners"] if b["status"] != "deleted"])
+    names = [n.strip() for n in names if n and n.strip()]  # пустые названия не считаем ни плохими, ни в общем числе
     if not names:
         return []
-    bad = [n for n in names if not n.strip() or any(p.fullmatch(n.strip()) for p in pats)]
+    bad = [n for n in names if any(p.fullmatch(n) for p in pats)]
     share = len(bad) / len(names)
     if share < th["default_name_share"]:
         return []

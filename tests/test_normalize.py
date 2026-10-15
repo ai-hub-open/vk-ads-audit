@@ -468,3 +468,14 @@ def test_windows_partial_rows(tmp_path):
 def test_non_numeric_max_price_is_none():
     from scripts.normalize import _price
     assert _price("abc") is None and _price("12,5") == 12.5
+
+
+def test_layer_unknown_without_targetings_key(tmp_path):
+    raw = tmp_path / "raw"
+    groups = [{"id": 1, "name": "G1", "status": "active", "objective": "site_conversions", "ad_plan_id": 7},
+              {"id": 2, "name": "G2", "status": "active", "objective": "site_conversions", "ad_plan_id": 7,
+               "targetings": {"geo": {"regions": [1]}}}]
+    cabinet(raw, groups)
+    ds = build_dataset(raw, "2026-09-01", "2026-09-30", as_of="2026-10-01T10:00")
+    g1, g2 = ds["groups"]
+    assert g1["layer"] is None and g2["layer"] == "cold"
