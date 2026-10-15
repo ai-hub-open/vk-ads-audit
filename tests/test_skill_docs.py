@@ -4,8 +4,9 @@ import json
 import re
 import zipfile
 
+from scripts import features
 from scripts._workspace import SKILL_ROOT
-from scripts.diagnose import RULES, load_thresholds
+from scripts.diagnose import CHECK_OF, RULES, load_thresholds
 from scripts.make_bundle import build
 from scripts.render_report import ALWAYS_LIMITATIONS
 
@@ -85,3 +86,30 @@ def test_references_document_new_behaviour():
     assert "Статистика не получена для N групп" in lim and "Сумма по объявлениям меньше" in lim
     assert "client_note" in tpl and "Объяснено клиентом" in tpl
     assert "banner_groups" in rules and "_measured" in rules and "stats_missing" in rules
+
+
+def test_every_rule_has_check():
+    assert {fn.__name__ for fn in RULES} - {"scale_leader"} <= set(CHECK_OF)
+
+
+def test_check_ids_documented():
+    doc = (SKILL_ROOT / "references" / "diagnostic-rules.md").read_text(encoding="utf-8")
+    for cid in set(CHECK_OF.values()):
+        assert f"`{cid}`" in doc, cid
+
+
+def test_api_field_candidates_listed_for_live_gate():
+    doc = (SKILL_ROOT / "references" / "mcp-read-tools.md").read_text(encoding="utf-8")
+    for name in ("KEYWORD_KEYS", "MINUS_KEYS", "KW_PERIOD_KEYS", "KW_EXPAND_KEYS", "EXCLUDE_KEYS", "COMMUNITY_KEYS",
+                 "AUTO_PADS_KEYS", "DEVICE_ADJ_KEYS", "DEMO_ADJ_KEYS", "ERID_KEYS", "AUTO_UTM_KEYS",
+                 "PLAN_BUDGET_KEYS", "SIZE_KEYS", "UPDATED_KEYS"):
+        for key in getattr(features, name):
+            assert f"`{key}`" in doc, key
+
+
+def test_client_questions_documented():
+    from scripts.questions import build_questions
+    from tests.helpers import make_ds
+    doc = (SKILL_ROOT / "references" / "client-questions.md").read_text(encoding="utf-8")
+    for q in build_questions(make_ds([]), load_thresholds(), []):
+        assert q["text"] in doc

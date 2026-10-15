@@ -38,10 +38,13 @@ except ImportError:  # запуск напрямую
     from raw_store import write_call
 
 PLAN_FIELDS = "id,name,status,objective,budget_limit,budget_limit_day,date_start,date_end,created,updated"
-GROUP_FIELDS = ("id,name,status,objective,package_id,ad_plan_id,budget_limit,budget_limit_day,targetings,"
-                "issues,created,updated,date_start,date_end,delivery,autobidding_mode,max_price,priced_goal")
-BANNER_FIELDS = ("id,name,campaign_id,status,moderation_status,moderation_reasons,issues,delivery,"
-                 "textblocks,urls,content,created,updated,user_can_request_remoderation")
+# Базовые списки — подтверждены живым прогоном; расширенные добавляют поля методики v1 (имена по документации).
+GROUP_FIELDS_BASE = ("id,name,status,objective,package_id,ad_plan_id,budget_limit,budget_limit_day,targetings,"
+                     "issues,created,updated,date_start,date_end,delivery,autobidding_mode,max_price,priced_goal")
+BANNER_FIELDS_BASE = ("id,name,campaign_id,status,moderation_status,moderation_reasons,issues,delivery,"
+                      "textblocks,urls,content,created,updated,user_can_request_remoderation")
+GROUP_FIELDS = GROUP_FIELDS_BASE + ",enable_utm,auto_utm"
+BANNER_FIELDS = BANNER_FIELDS_BASE + ",call_to_action,erid,ord_token,ord_erid"
 STATS_CHUNK = 50
 METRICS = "all"
 LISTS = ("vk_ads_remarketing_segments_list", "vk_ads_users_lists_list", "vk_ads_remarketing_pixels_list")
@@ -103,6 +106,13 @@ class _Collector:
         self._record(tool, args)
         return items
 
+    def listing_with_fallback(self, tool: str, args: dict, base_fields: str):
+        """Расширенный список fields; сервер мог его отвергнуть (McpError) — один повтор с базовым."""
+        items = self.listing(tool, args)
+        if items is None:
+            items = self.listing(tool, {**args, "fields": base_fields})
+        return items
+
 
 def collect(client, raw_dir: Path, date_from: str, date_to: str, mode: str = "deep", *,
             secrets=()) -> dict:
@@ -119,16 +129,21 @@ def collect(client, raw_dir: Path, date_from: str, date_to: str, mode: str = "de
     try:
         period = {"date_from": date_from, "date_to": date_to, "metrics": METRICS}
         c.listing("vk_ads_ad_plans_list", {"fields": PLAN_FIELDS})
-        groups = c.listing("vk_ads_campaigns_list", {"fields": GROUP_FIELDS})
+        groups = c.listing_with_fallback("vk_ads_campaigns_list", {"fields": GROUP_FIELDS}, GROUP_FIELDS_BASE)
         if groups is None:
             log["critical"] = True
             groups = []
         live = [g["id"] for g in groups if g.get("status") != "deleted"]
 
         banner_ids: list = []
+        banner_fields = BANNER_FIELDS
         if mode == "deep":
             for gid in live:
-                banners = c.listing("vk_ads_banners_list", {"campaign_id": gid, "fields": BANNER_FIELDS}) or []
+                banners = c.listing("vk_ads_banners_list", {"campaign_id": gid, "fields": banner_fields})
+                if banners is None and banner_fields != BANNER_FIELDS_BASE:
+                    banner_fields = BANNER_FIELDS_BASE  # расширенные поля не приняты — дальше сразу базовые
+                    banners = c.listing("vk_ads_banners_list", {"campaign_id": gid, "fields": banner_fields})
+                banners = banners or []
                 banner_ids += [b["id"] for b in banners if b.get("status") != "deleted"]
             for tool in LISTS:
                 c.listing(tool, {})
