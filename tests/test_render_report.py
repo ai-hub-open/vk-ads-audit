@@ -107,3 +107,45 @@ def test_metrika_total_block_rendered():
 def test_no_metrika_total_block_without_data():
     ds, fs = sample()
     assert "Метрика, весь трафик VK" not in render(ds, fs)
+
+
+from scripts.checks import run_checks
+from scripts.diagnose import load_thresholds as _lt
+from scripts.questions import build_questions
+
+
+def full_sample():
+    ds, fs = sample()
+    th = _lt()
+    fs["checklist"] = run_checks(ds, th, fs["findings"], fs["evaluated"])
+    fs["questions"] = build_questions(ds, th, fs["findings"])
+    return ds, fs
+
+
+def test_checklist_and_score_rendered():
+    ds, fs = full_sample()
+    html = render(ds, fs)
+    n, m = fs["checklist"]["total"]
+    assert f"{n} / {m}" in html and "Техническая настройка" in html and "✅" in html and "❌" in html
+
+
+def test_questions_rendered():
+    ds, fs = full_sample()
+    html = render(ds, fs)
+    assert "Вопросы к клиенту" in html and "важно для вашего кабинета" in html
+
+
+def test_unknown_checks_go_to_limitations():
+    ds, fs = full_sample()
+    lines = limitations(ds, None, fs["checklist"])
+    assert any(x.startswith("Не проверено «") for x in lines)
+
+
+def test_finding_shows_check_id():
+    ds, fs = full_sample()
+    assert "проверка F6" in render(ds, fs)
+
+
+def test_old_findings_without_checklist():
+    ds, fs = sample()
+    assert "Чек-лист" not in render(ds, fs)

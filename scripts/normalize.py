@@ -16,16 +16,24 @@ import json
 import math
 import re
 import sys
-from datetime import date
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 try:
     from scripts._console import setup_console
     from scripts._workspace import resolve_workspace
+    from scripts.features import (AUTO_UTM_KEYS, ERID_KEYS, EXCLUDE_KEYS, PLAN_BUDGET_KEYS, SIZE_KEYS, UPDATED_KEYS,
+                                  SEGMENT_RELATION_KEYS, banner_text, content_features, first_known, is_lal,
+                                  layer_of, observed_keys, parse_dt, targeting_features, url_strings,
+                                  users_list_ids)
     from scripts.raw_store import items_of, read_calls
 except ImportError:  # запуск напрямую
     from _console import setup_console
     from _workspace import resolve_workspace
+    from features import (AUTO_UTM_KEYS, ERID_KEYS, EXCLUDE_KEYS, PLAN_BUDGET_KEYS, SIZE_KEYS, UPDATED_KEYS,
+                          SEGMENT_RELATION_KEYS, banner_text, content_features, first_known, is_lal,
+                          layer_of, observed_keys, parse_dt, targeting_features, url_strings,
+                          users_list_ids)
     from raw_store import items_of, read_calls
 
 KOPECKS = 100
@@ -102,20 +110,24 @@ def targeting_key(t) -> str:
     return json.dumps(_canon(t), sort_keys=True, ensure_ascii=False)
 
 
-def _segment_ids(t) -> list:
+def _segment_ids(t, excluded: bool = False) -> list:
+    """id сегментов таргетинга; excluded=True — только исключённые (под EXCLUDE_KEYS), иначе только целевые."""
     found: set = set()
 
-    def walk(v, inside):
+    def walk(v, inside, under_exclude):
         if isinstance(v, dict):
             for k, x in v.items():
-                walk(x, inside or "segment" in k)
+                is_exclude = k in EXCLUDE_KEYS
+                if is_exclude and not excluded:
+                    continue
+                walk(x, inside or "segment" in k, under_exclude or is_exclude)
         elif isinstance(v, list):
             for x in v:
-                walk(x, inside)
-        elif inside and isinstance(v, int):
+                walk(x, inside, under_exclude)
+        elif inside and isinstance(v, int) and not isinstance(v, bool) and under_exclude == excluded:
             found.add(v)
 
-    walk(t or {}, False)
+    walk(t or {}, False, False)
     return sorted(found)
 
 
@@ -197,7 +209,59 @@ def _entity_stats(raw_dir: Path, tool: str, entity: str, period: tuple) -> tuple
     return out, covered, calls
 
 
-def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, path: str = "B") -> dict:
+def _price(v):
+    if v in (None, ""):
+        return None
+    try:
+        p = round(money(v), 2)
+    except ValueError:
+        return None
+    return p or None
+
+
+def _field_set(fields) -> set:
+    if isinstance(fields, str):
+        fields = fields.split(",")
+    return {str(f).strip() for f in fields} if isinstance(fields, (list, tuple)) else set()
+
+
+def _blind_ids(raw_dir: Path, tool: str, keys) -> set:
+    """id сущностей, полученных только вызовами, где `fields` задан и не содержит ни одного из keys:
+    значит, отсутствие поля у них — «не запрошено», а не «пусто». Вызов без `fields` отдаёт поля по умолчанию."""
+    blind: set = set()
+    sighted: set = set()
+    for call in read_calls(raw_dir, tool):
+        fields = call["arguments"].get("fields")
+        asked = fields is None or any(k in _field_set(fields) for k in keys)
+        ids = {it["id"] for it in _response_items(call) if isinstance(it, dict) and "id" in it}
+        (sighted if asked else blind).update(ids)
+    return blind - sighted
+
+
+def _auto_utm(g, observed):
+    if not any(k in observed for k in AUTO_UTM_KEYS):
+        return None
+    return bool(first_known(g, AUTO_UTM_KEYS, observed))
+
+
+WINDOWS = (7, 14, 30)
+
+
+def windows_of(daily: list, d_from: date, d_to: date) -> dict:
+    """Окна последних N дней периода; окно длиннее периода — None (сравнивать не с чем)."""
+    out: dict = {}
+    for n in WINDOWS:
+        start = d_to - timedelta(days=n - 1)
+        if start < d_from:
+            out[str(n)] = None
+            continue
+        rows = [r for r in daily if r.get("date") and start.isoformat() <= r["date"] <= d_to.isoformat()]
+        out[str(n)] = aggregate(rows) if rows else None
+    return out
+
+
+def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, path: str = "B",
+                  as_of=None) -> dict:
     raw_dir = Path(raw_dir)
     d_from, d_to = date.fromisoformat(date_from), date.fromisoformat(date_to)
     if d_to < d_from:
@@ -227,9 +291,18 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
                 banner_groups.add(_gid(b["campaign_id"]))
             banners.append({**b, "_group": b.get("campaign_id") or gid})
 
+    raw_groups = _list_items(raw_dir, "vk_ads_campaigns_list")
+    observed_t = observed_keys(g.get("targetings") for g in raw_groups)
+    observed_g = observed_keys(raw_groups)
+    seg_items = _list_items(raw_dir, "vk_ads_remarketing_segments_list")
+    segments_by_id = {s.get("id"): s for s in seg_items}
+    observed_b = observed_keys(banners)
+    erid_blind = _blind_ids(raw_dir, "vk_ads_banners_list", ERID_KEYS)
+    utm_blind = _blind_ids(raw_dir, "vk_ads_campaigns_list", AUTO_UTM_KEYS)
+
     objective_of: dict = {}
     groups = []
-    for g in _list_items(raw_dir, "vk_ads_campaigns_list"):
+    for g in raw_groups:
         obj = g.get("objective")
         objective_of[g["id"]] = obj
         daily = [{"date": r.get("date"), **stats_from(r, obj)}
@@ -251,7 +324,13 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
             "issues": _codes(g.get("issues")), "created": g.get("created"), "date_end": g.get("date_end"),
             "targeting_key": targeting_key(g.get("targetings")),
             "segment_ids": _segment_ids(g.get("targetings")),
+            "excluded_segment_ids": _segment_ids(g.get("targetings"), excluded=True),
             "stats": stats, "daily": daily,
+            "features": targeting_features(g.get("targetings"), observed_t),
+            "layer": layer_of(_segment_ids(g.get("targetings")), segments_by_id) if "targetings" in g else None,
+            "max_price_rub": _price(g.get("max_price")),
+            "auto_utm": None if g["id"] in utm_blind else _auto_utm(g, observed_g),
+            "windows": windows_of(daily, d_from, d_to),
             "banner_ids": [b["id"] for b in banners if b["_group"] == g["id"]],
         }
         if missing:
@@ -266,6 +345,14 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
             "moderation_status": b.get("moderation_status"), "moderation_reasons": b.get("moderation_reasons"),
             "issues": _codes(b.get("issues")),
             "can_remoderate": bool(b.get("user_can_request_remoderation")),
+            "cta": (str(b["call_to_action"]) if b.get("call_to_action") not in (None, "") else None),
+            "text": banner_text(b.get("textblocks")),
+            "urls": url_strings(b.get("urls")),
+            **content_features(b.get("content")),
+            "created": b.get("created"), "updated": b.get("updated"),
+            "age_days": (d_to - parse_dt(b["created"]).date()).days if parse_dt(b.get("created")) else None,
+            "erid": (None if b["id"] in erid_blind or not any(k in observed_b for k in ERID_KEYS)
+                     else str(first_known(b, ERID_KEYS, observed_b) or "")),
             "stats": stats_from(st.get("total"), objective_of.get(b["_group"])) if st else None,
         })
 
@@ -289,16 +376,40 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
     def named(tool):
         return [{"id": x.get("id"), "name": x.get("name") or ""} for x in _list_items(raw_dir, tool)]
 
+    raw_plans = _list_items(raw_dir, "vk_ads_ad_plans_list")
+    observed_p = observed_keys(raw_plans)
+    plan_budget_known = any(k in observed_p for k in PLAN_BUDGET_KEYS)
+
+    def plan_out(p):
+        day, total = kopecks_to_rub(p.get("budget_limit_day")), kopecks_to_rub(p.get("budget_limit"))
+        return {"id": p.get("id"), "name": p.get("name") or "", "status": p.get("status"),
+                "budget_day_rub": day, "budget_total_rub": total,
+                "has_budget": bool(day or total) if plan_budget_known else None}
+
+    observed_s = observed_keys(seg_items)
+    users_items = _list_items(raw_dir, "vk_ads_users_lists_list")
+    observed_u = observed_keys(users_items)
+
+    def size_of(x, observed):
+        v = first_known(x, SIZE_KEYS, observed)
+        return v if isinstance(v, int) and not isinstance(v, bool) else None
+
+    relations_known = any(k in observed_s for k in SEGMENT_RELATION_KEYS)
     return {
         "period": {"from": date_from, "to": date_to, "days": (d_to - d_from).days + 1},
         "target_cpa": target_cpa,
-        "plans": [{"id": p.get("id"), "name": p.get("name") or "", "status": p.get("status")}
-                  for p in _list_items(raw_dir, "vk_ads_ad_plans_list")],
+        "plans": [plan_out(p) for p in raw_plans],
         "groups": groups, "banners": banner_out,
-        "segments": named("vk_ads_remarketing_segments_list"),
-        "users_lists": named("vk_ads_users_lists_list"),
+        "segments": [{"id": s.get("id"), "name": s.get("name") or "", "lal": is_lal(s),
+                      "size": size_of(s, observed_s),
+                      "list_ids": users_list_ids(s) if relations_known else None} for s in seg_items],
+        "segment_relations_known": relations_known,
+        "users_lists": [{"id": u.get("id"), "name": u.get("name") or "", "size": size_of(u, observed_u),
+                         "updated": first_known(u, UPDATED_KEYS, observed_u)} for u in users_items],
         "pixels": named("vk_ads_remarketing_pixels_list"),
         "totals": aggregate([g["stats"] for g in live_groups]),
+        "as_of": as_of or datetime.now().isoformat(timespec="minutes"),
+        "totals_windows": windows_of([r for g in live_groups for r in g["daily"]], d_from, d_to),
         "notes": notes,
         "coverage": {"path": path, "banners": bool(banner_calls),
                      "banner_groups": sorted(banner_groups, key=lambda x: (str(type(x)), x)),

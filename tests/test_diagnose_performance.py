@@ -136,15 +136,22 @@ def test_paused_group_is_not_learning_starved():
 
 
 def test_learning_uses_run_days_not_period():
-    # 14 дней с показами, 25 конверсий → 12.5 в неделю ≥ 10; по всему периоду (30 дней) было бы 5.8
+    # 14 дней с показами, 35 конверсий → 17.5 в неделю ≥ 15 (новый порог); по всему периоду (30 дней) было бы 8.2
     daily = [day(f"2026-09-{d:02d}", 200, 1000, 20, 2) for d in range(1, 15)] + \
             [day(f"2026-09-{d:02d}", 0, 0, 0) for d in range(15, 31)]
-    g = make_group(1, autobidding_mode="max_goals", daily=daily, stats=stats(2800, 14000, 280, 25))
+    g = make_group(1, autobidding_mode="max_goals", daily=daily, stats=stats(2800, 14000, 280, 35))
     assert ("learning_starved", 1) not in found(make_ds([g], banners(1)))
 
 
+def test_burnout_red_above_five():
+    daily = [day(f"2026-09-{d:02d}", 100, 1000, 20) for d in range(1, 31)]
+    g = make_group(1, daily=daily, stats=stats(3000, 30000, 600, 0, frequency=6.0))
+    f = found(make_ds([g], banners(1)))[("burnout", 1)]
+    assert f["level"] == "red"
+
+
 def test_spend_concentration():
-    gs = [make_group(1, stats=stats(8000, 1, 1)), make_group(2, stats=stats(1000, 1, 1)),
+    gs =[make_group(1, stats=stats(8000, 1, 1)), make_group(2, stats=stats(1000, 1, 1)),
           make_group(3, stats=stats(1000, 1, 1))]
     assert ("spend_concentration", 1) in found(make_ds(gs, banners(1) + banners(2) + banners(3)))
 
