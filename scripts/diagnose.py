@@ -936,13 +936,22 @@ def main(argv=None) -> int:
         print("нет dataset.json — сначала нормализация (python -m scripts.normalize ...)", file=sys.stderr)
         return 2
     ds = json.loads((ws / "dataset.json").read_text(encoding="utf-8"))
-    result = diagnose(ds, load_thresholds(args.thresholds))
+    try:  # здесь, а не наверху модуля: checks и questions импортируют diagnose
+        from scripts.checks import run_checks
+        from scripts.questions import build_questions
+    except ImportError:  # запуск напрямую
+        from checks import run_checks
+        from questions import build_questions
+    th = load_thresholds(args.thresholds)
+    result = diagnose(ds, th)
+    result["checklist"] = run_checks(ds, th, result["findings"])
+    result["questions"] = build_questions(ds, th, result["findings"])
     (ws / "findings.json").write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
     counts = defaultdict(int)
     for f in result["findings"]:
         counts[f["level"]] += 1
     print(f"находок: {len(result['findings'])} ({dict(counts)}), опорный CPA: {result['ref_cpa']} "
-          f"({result['ref_source']})")
+          f"({result['ref_source']}), балл {result['checklist']['total'][0]} / {result['checklist']['total'][1]}")
     return 0
 
 
