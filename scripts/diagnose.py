@@ -420,6 +420,133 @@ def naming(ds, th, ctx):
                     "Называть по схеме сегмент_гео_пол-возраст_устройство (например, «конкур_Кар_Ж20-45_моб»)")]
 
 
+# ---------- v1: таргетинг и стратегия ----------
+
+def _kw_groups(ds, th):
+    return [g for g in _live(ds) if _active(g, th) and _feat(g).get("has_keywords")]
+
+
+@rule
+def no_minus_phrases(ds, th, ctx):
+    return [finding("no_minus_phrases", "white", "group", g, "Ключевые фразы без минус-фраз", {},
+                    "Добавить минус-фразы: нецелевые запросы съедают бюджет")
+            for g in _kw_groups(ds, th) if _feat(g).get("has_minus") is False]
+
+
+@rule
+def kw_period(ds, th, ctx):
+    lo, hi = th["kw_period_days"]
+    return [finding("kw_period", "white", "group", g, f"Период поиска ключевых фраз вне {lo}–{hi} дней",
+                    {"period_days": _feat(g)["kw_period"]}, f"Поставить период {lo}–{hi} дней")
+            for g in _kw_groups(ds, th)
+            if isinstance(_feat(g).get("kw_period"), int) and not lo <= _feat(g)["kw_period"] <= hi]
+
+
+@rule
+def kw_expand_off(ds, th, ctx):
+    return [finding("kw_expand_off", "green", "group", g, "Не включено «Расширить список ключевых фраз»", {},
+                    "Включить в блоке «Аудитории» группы: VK добавит близкие запросы и расширит охват")
+            for g in _kw_groups(ds, th) if _feat(g).get("kw_expand") is False]
+
+
+@rule
+def no_exclusions(ds, th, ctx):
+    return [finding("no_exclusions", "orange", "group", g,
+                    "Нет минус-аудиторий: реклама показывается тем, кто уже купил", {"objective": g["objective"]},
+                    "Исключить текущих клиентов и тех, кто уже совершил конверсию")
+            for g in _live(ds) if _active(g, th) and g["objective"] in th["conversion_objectives"]
+            and _feat(g).get("has_exclusions") is False]
+
+
+@rule
+def too_broad(ds, th, ctx):
+    out = []
+    for g in _live(ds):
+        if not _active(g, th) or _layer(g) is None:  # targetings не получены — широта неизвестна, не молчаливо «широко»
+            continue
+        f = _feat(g)
+        regions = f.get("regions") or []
+        country = not regions or set(regions) <= set(th["country_region_ids"])
+        span = f.get("age_span") if f.get("age_span") is not None else 100
+        narrowed = f.get("has_interests") or f.get("has_keywords") or g["segment_ids"] or f.get("has_communities")
+        if country and span >= th["broad_age_span"] and not narrowed:
+            out.append(finding("too_broad", "orange", "group", g,
+                               "Слишком широкий таргетинг: вся страна, широкий возраст, без интересов",
+                               {"regions": regions, "age_span": f.get("age_span")},
+                               "Сузить: интересы, ключевые фразы, сообщества или сегменты",
+                               effect_rub=0 if g.get("stats_missing") else g["stats"]["spent"]))
+    return out
+
+
+@rule
+def creative_overlap(ds, th, ctx):
+    groups = {g["id"]: g for g in _live(ds) if _active(g, th)}
+    by_content = defaultdict(set)
+    for b in ds["banners"]:
+        if b["status"] in th["active_statuses"] and b["group_id"] in groups:
+            for cid in b.get("content_ids") or []:
+                by_content[cid].add(b["group_id"])
+    seen, out = set(), []
+    for gids in by_content.values():
+        gids = sorted(gids, key=str)
+        if len(gids) < 2 or tuple(gids) in seen:
+            continue
+        shared = set.intersection(*(set(groups[i]["segment_ids"]) for i in gids))
+        if shared:
+            seen.add(tuple(gids))
+            out.append(finding("creative_overlap", "orange", "group", groups[gids[0]],
+                               "Один креатив на пересекающиеся аудитории — группы конкурируют",
+                               {"groups": gids, "shared_segments": sorted(shared, key=str)},
+                               "Развести аудитории или креативы, исключить пересечения"))
+    return out
+
+
+@rule
+def lal_small_source(ds, th, ctx):
+    return [finding("lal_small_source", "orange", "segment", s, "LAL собран на слишком маленькой базе",
+                    {"source_size": s["size"], "minimum": th["lal_min_source"]},
+                    f"Пересобрать LAL на базе от {th['lal_min_source']} целевых действий")
+            for s in ds["segments"] if s.get("lal") and isinstance(s.get("size"), int)
+            and s["size"] < th["lal_min_source"]]
+
+
+@rule
+def stale_list(ds, th, ctx):
+    end = date.fromisoformat(ds["period"]["to"])
+    out = []
+    for lst in ds["users_lists"]:
+        d = _date(lst.get("updated"))
+        if d and (end - d).days > th["list_stale_days"]:
+            out.append(finding("stale_list", "white", "list", lst, "База давно не обновлялась",
+                               {"days_since_update": (end - d).days},
+                               "Обновить базу или перейти на динамический ретаргетинг"))
+    return out
+
+
+@rule
+def manual_placements(ds, th, ctx):
+    return [finding("manual_placements", "white", "group", g, "Места размещения выбраны вручную", {},
+                    "Включить автоматический выбор площадок — система покажет рекламу там, где она эффективнее")
+            for g in _live(ds) if _active(g, th) and _feat(g).get("auto_placements") is False]
+
+
+@rule
+def cap_too_early(ds, th, ctx):
+    out = []
+    for g in _measured(ds):
+        if not _active(g, th) or not g.get("max_price_rub"):
+            continue
+        w7 = (g.get("windows") or {}).get("7")
+        conv7 = w7["conversions"] if w7 else g["stats"]["conversions"]
+        if conv7 < th["learning_min_conversions_per_week"]:
+            out.append(finding("cap_too_early", "orange", "group", g,
+                               "«Предельная цена» включена до накопления статистики",
+                               {"max_price_rub": g["max_price_rub"], "conversions_7d": conv7,
+                                "needed": th["learning_min_conversions_per_week"]},
+                               "Вернуть «Минимальную цену», пока не будет 15+ конверсий за неделю"))
+    return out
+
+
 # ---------- эффективность ----------
 
 @rule
