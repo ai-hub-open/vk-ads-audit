@@ -113,3 +113,13 @@ def test_client_questions_documented():
     doc = (SKILL_ROOT / "references" / "client-questions.md").read_text(encoding="utf-8")
     for q in build_questions(make_ds([]), load_thresholds(), []):
         assert q["text"] in doc
+
+
+def test_funnel_questions_documented():
+    from scripts.diagnose import ASK_FUNNELS
+    doc = _ref("client-questions.md")
+    for key, f in ASK_FUNNELS.items():
+        assert f["question"] in doc and f["why"] in doc and f"funnel_{key}" in doc, key
+    assert "client_answers.json" in doc and "client_answers.json" in SKILL
+    rules = _ref("diagnostic-rules.md")
+    assert "`funnel_potential`" in rules and "`ask`" in rules and "`potential`" in rules

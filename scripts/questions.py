@@ -5,16 +5,16 @@ questions.py — вопросы к клиенту: то, что эксперты
 from __future__ import annotations
 
 try:
-    from scripts.diagnose import _active, _live
+    from scripts.diagnose import ASK_FUNNELS, _active, _live, absent_ask_funnels
 except ImportError:  # запуск напрямую
-    from diagnose import _active, _live
+    from diagnose import ASK_FUNNELS, _active, _live, absent_ask_funnels
 
 
 def _objectives(ds, th) -> set:
     return {g["objective"] for g in _live(ds) if _active(g, th)}
 
 
-def build_questions(ds: dict, th: dict, findings: list) -> list:
+def build_questions(ds: dict, th: dict, findings: list, answers: dict | None = None) -> list:
     obj = _objectives(ds, th)
     rules = {f["rule"] for f in findings}
     social = set(th["funnel_objectives"]["subscription"])
@@ -38,4 +38,10 @@ def build_questions(ds: dict, th: dict, findings: list) -> list:
         ("audience_fit", "Совпадают ли аудитории и посыл креативов с вашим портретом клиента?", None),
         ("narrow_interests", "Не слишком ли узкие интересы в группах с маленьким охватом?", None),
     ]
-    return [{"id": i, "text": t, "important": why is not None, "why": why} for i, t, why in q]
+    out = [{"id": i, "text": t, "important": why is not None, "why": why} for i, t, why in q]
+    answered = answers or {}
+    for key in absent_ask_funnels(ds, th):  # воронки нет среди активных групп — спрашиваем, пока клиент не ответил
+        if key not in answered:
+            f = ASK_FUNNELS[key]
+            out.append({"id": f"funnel_{key}", "text": f["question"], "important": True, "why": f["why"]})
+    return out

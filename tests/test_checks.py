@@ -37,7 +37,7 @@ def test_funnels():
     gs = [make_group(1, objective="leadads", layer="warm"), make_group(2, objective="site_conversions")]
     cl = checklist(make_ds(gs, [make_banner(11, 1, urls=["https://vk.com/app5898182_-1#s=senler"])]))
     assert status(cl, "B1.leadform") == "pass" and status(cl, "B1.retargeting") == "pass"
-    assert status(cl, "B1.site") == "pass" and status(cl, "B1.subscription") == "fail"
+    assert status(cl, "B1.site") == "pass" and status(cl, "B1.subscription") == "ask"
     assert status(cl, "B1.senler") == "pass"
 
 

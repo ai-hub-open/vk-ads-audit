@@ -33,7 +33,9 @@ def test_every_new_rule_fires_somewhere(tmp_path):
 def test_healthy_checklist_has_no_fails(tmp_path):
     cl = checklist_of("healthy", tmp_path)
     fails = [c["id"] for b in cl["blocks"] for c in b["checks"] if c["status"] == "fail"]
-    assert fails == ["B1.subscription", "B1.leadform", "B1.senler"]   # воронок этих нет — это не ошибка кабинета
+    assert fails == []
+    st = {c["id"]: c["status"] for b in cl["blocks"] for c in b["checks"]}
+    assert [st[k] for k in ("B1.subscription", "B1.leadform", "B1.senler")] == ["ask"] * 3   # спросить клиента, не ❌
 
 
 def test_healthy_checklist_demonstrates_passes(tmp_path):

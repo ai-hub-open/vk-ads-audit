@@ -2,7 +2,9 @@
 checks.py — чек-листы отчёта по блокам A–G (методика v1, формат агентского аудита).
 
 Статусы: pass ✅, fail ❌, unknown — данных нет (поле не получено из API, путь A, нет Метрики),
-na — неприменимо. unknown и na не входят в знаменатель балла; unknown уходит в «Ограничения».
+na — неприменимо, ask ❓ — отсутствующую воронку (подписка / лид-форма / Senler) сначала уточняем у клиента,
+potential 🟢 — клиент подтвердил потенциал роста. Всё кроме pass и fail не входит в знаменатель балла;
+в «Ограничения» уходит только unknown.
 Проверка с правилами: fail, если сработала хотя бы одна находка её правил.
 """
 from __future__ import annotations
@@ -10,15 +12,16 @@ from __future__ import annotations
 from collections import defaultdict
 
 try:
-    from scripts.diagnose import _active, _banner_groups, _date, _feat, _layer, _live, _run_days
+    from scripts.diagnose import (ASK_FUNNELS, FUNNEL_LABELS, _active, _banner_groups, _date, _feat, _layer, _live,
+                                  _run_days, funnel_status)
 except ImportError:  # запуск напрямую
-    from diagnose import _active, _banner_groups, _date, _feat, _layer, _live, _run_days
+    from diagnose import (ASK_FUNNELS, FUNNEL_LABELS, _active, _banner_groups, _date, _feat, _layer, _live,
+                          _run_days, funnel_status)
 
 BLOCKS = [("A", "Техническая настройка"), ("B", "Структура аккаунта"), ("C", "Таргетинг"),
           ("D", "Бюджет и стратегия"), ("E", "Объявления"), ("F", "Эффективность"),
           ("G", "Воронка после клика")]
-FUNNELS = [("subscription", "подписка на сообщество"), ("leadform", "лид-форма"), ("retargeting", "ретаргетинг"),
-           ("senler", "Senler"), ("site", "трафик на сайт")]
+FUNNELS = FUNNEL_LABELS
 OK = (None, "")
 
 
@@ -39,7 +42,8 @@ def _known_feature(groups, key, label):
     return OK if any(_feat(g).get(key) is not None for g in groups) else _unknown(label)
 
 
-def run_checks(ds: dict, th: dict, findings: list, evaluated: dict | None = None) -> dict:
+def run_checks(ds: dict, th: dict, findings: list, evaluated: dict | None = None,
+               answers: dict | None = None) -> dict:
     fired = defaultdict(list)
     for f in findings:
         fired[f["rule"]].append(f)
@@ -93,18 +97,19 @@ def run_checks(ds: dict, th: dict, findings: list, evaluated: dict | None = None
                     else _unknown("авто-UTM группы")))
 
     # B
-    objectives = {g["objective"] for g in live}
-    funnel_ok = {k: bool(objectives & set(v)) for k, v in th["funnel_objectives"].items()}
-    funnel_ok["retargeting"] = any(_layer(g) == "warm" for g in live)
-    urls = [u.lower() for b in banners for u in b.get("urls") or []]
+    funnels = funnel_status(ds, th)
+    answers = answers or {}
     for key, title in FUNNELS:
-        if not live:
-            present(f"B1.{key}", f"Воронка: {title}", False, ("na", "нет активных групп"))
-        elif key == "senler":
-            gate = OK if urls else ("unknown", "ссылки объявлений не получены")
-            present(f"B1.{key}", f"Воронка: {title}", any(m in u for m in th["senler_markers"] for u in urls), gate)
-        else:
-            present(f"B1.{key}", f"Воронка: {title}", funnel_ok[key], layer_gate if key == "retargeting" else OK)
+        status, reason = funnels[key]
+        if status == "fail" and key in ASK_FUNNELS:
+            a = answers.get(key)
+            if a and a["verdict"] == "na":
+                status, reason = "na", ("не применимо: " + a["answer"] if a["answer"] else "не применимо")
+            elif a:
+                status, reason = "potential", ("потенциал роста: " + a["answer"] if a["answer"] else "потенциал роста")
+            else:
+                status, reason = "ask", "воронка не используется — уточнить у клиента"
+        add(f"B1.{key}", f"Воронка: {title}", status, reason)
     by_rules("B2", "Есть тёплый, LAL и холодный слои", ["layer_missing", "no_retargeting"], layer_gate)
     spend = sum(g["stats"]["spent"] for g in _live(ds))
     by_rules("B3", "Доли бюджета по слоям", ["layer_share"], _first(layer_gate, OK if spend else ("na", "нет расхода за период")))

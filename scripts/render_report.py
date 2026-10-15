@@ -38,10 +38,11 @@ h1{font-size:22px;margin:0 0 4px}h2{font-size:17px;margin:28px 0 8px;border-bott
 .tile b{display:block;font-size:18px}.f{border:1px solid #e3e3e3;border-radius:8px;padding:10px 14px;margin:8px 0}
 .f h3{font-size:15px;margin:0 0 4px}.f.explained{background:#f6f6f6;color:#555}.note{font-style:italic}table{border-collapse:collapse;width:100%;font-size:13px}
 td,th{border-bottom:1px solid #eee;padding:4px 6px;text-align:left}th{background:#fafafa}
-.score{font-weight:600}.st-pass{color:#1a7f37}.st-fail{color:#c62828}.st-unk{color:#888}
+.score{font-weight:600}.st-pass{color:#1a7f37}.st-fail{color:#c62828}.st-unk{color:#888}.st-pot{color:#1a7f37}
 @media print{body{margin:0}.f{break-inside:avoid}}
 """
-STATUS_ICON = {"pass": "✅", "fail": "❌", "unknown": "—", "na": "—"}
+STATUS_ICON = {"pass": "✅", "fail": "❌", "unknown": "—", "na": "—", "ask": "❓", "potential": "🟢"}
+STATUS_CLASS = {"pass": "pass", "fail": "fail", "unknown": "unk", "na": "unk", "ask": "unk", "potential": "pot"}
 
 
 def fmt_rub(v) -> str:
@@ -129,7 +130,7 @@ def _checklist_html(cl) -> str:
         bn, bm = b["score"]
         rows = "".join(
             f"<tr><td>{escape(c['id'])}</td><td>{escape(c['title'])}</td>"
-            f"<td class='st-{'unk' if c['status'] in ('unknown', 'na') else c['status']}'>{STATUS_ICON[c['status']]}</td>"
+            f"<td class='st-{STATUS_CLASS[c['status']]}'>{STATUS_ICON[c['status']]}</td>"
             f"<td class='muted'>{escape(c['reason'])}</td></tr>" for c in b["checks"])
         parts.append(f"<h3>{escape(b['id'])}. {escape(b['title'])} — {bn} / {bm if bm else '—'}</h3>"
                      f"<table>{rows}</table>")

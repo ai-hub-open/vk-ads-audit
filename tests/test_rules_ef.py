@@ -154,6 +154,34 @@ def test_cpa_trend_early_group_skipped():
     assert found(make_ds([g]), "cpa_trend") == []
 
 
+def _zero_week(w7_spent, **kw):
+    w7, w30 = stats(w7_spent, 7000, 70, 0), stats(3000, 30000, 300, 20)   # cpa_30d 150
+    return make_group(1, stats=w30, windows={"7": w7, "14": None, "30": w30}, **kw)
+
+
+def test_cpa_trend_zero_week_fires_red():
+    f = found(make_ds([_zero_week(900)]), "cpa_trend")
+    assert len(f) == 1 and f[0]["level"] == "red" and f[0]["check"] == "F4"
+    assert f[0]["title"] == "За последнюю неделю нет конверсий"
+    assert f[0]["evidence"] == {"spent_7d": 900.0, "cpa_30d": 150.0, "conversions_30d": 20}
+    assert f[0]["effect_rub"] == 900.0
+
+
+def test_cpa_trend_zero_week_silent_below_one_cpa():
+    assert found(make_ds([_zero_week(100)]), "cpa_trend") == []
+
+
+def test_cpa_trend_zero_week_silent_when_month_too_thin():
+    w7, w30 = stats(900, 7000, 70, 0), stats(3000, 30000, 300, 2)
+    g = make_group(1, stats=w30, windows={"7": w7, "14": None, "30": w30})
+    assert found(make_ds([g]), "cpa_trend") == []
+
+
+def test_cpa_trend_zero_week_young_group_silent():
+    daily = [day("2026-09-28", 0, 0, 0), day("2026-09-29", 500, 3000, 30, 2), day("2026-09-30", 900, 4000, 40, 3)]
+    assert found(make_ds([_zero_week(900, daily=daily)]), "cpa_trend") == []
+
+
 def test_early_groups_skipped():
     daily = [day(f"2026-09-{d:02d}", 0, 0, 0) for d in range(1, 26)] + \
             [day(f"2026-09-{d:02d}", 1000, 2000, 2) for d in range(26, 31)]          # 5 дней работы

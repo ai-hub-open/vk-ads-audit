@@ -891,9 +891,18 @@ def cpa_trend(ds, th, ctx):
             continue
         w = g.get("windows") or {}
         w7, w30 = w.get("7"), w.get("30")
-        if not w7 or not w30 or not w7["cpa"] or not w30["cpa"] \
-                or w7["conversions"] < th["min_conversions_for_cpa"] \
-                or w30["conversions"] < th["min_conversions_for_cpa"]:
+        if not w7 or not w30 or not w30["cpa"] or w30["conversions"] < th["min_conversions_for_cpa"]:
+            continue
+        if w7["conversions"] == 0:  # неделя без конверсий: ждали хотя бы одну, раз потрачено на CPA и больше
+            if w7["spent"] >= w30["cpa"]:
+                _seen(ctx, "cpa_trend")
+                out.append(finding("cpa_trend", "red", "group", g, "За последнюю неделю нет конверсий",
+                                   {"spent_7d": w7["spent"], "cpa_30d": w30["cpa"],
+                                    "conversions_30d": w30["conversions"]},
+                                   "Проверить пиксель и событие оптимизации, остановить слив или обновить креативы",
+                                   effect_rub=w7["spent"], conf=confidence(w7["clicks"], th)))
+            continue
+        if not w7["cpa"] or w7["conversions"] < th["min_conversions_for_cpa"]:
             continue
         _seen(ctx, "cpa_trend")
         if w7["cpa"] >= w30["cpa"] * (1 + th["cpa_trend_rise"]):
@@ -1014,14 +1023,122 @@ def goals_without_vk_conversions(ds, th, ctx):
             if g["metrika"]["goal_reaches"] > 0 and g["stats"]["conversions"] == 0]
 
 
+# ---------- воронки, о которых спрашиваем клиента ----------
+
+FUNNEL_LABELS = [("subscription", "подписка на сообщество"), ("leadform", "лид-форма"),
+                 ("retargeting", "ретаргетинг"), ("senler", "Senler"), ("site", "трафик на сайт")]
+# Отсутствие этих воронок — не ошибка кабинета: сначала спрашиваем клиента (статус «ask»).
+# Ретаргетинг и сайт сюда не входят — их отсутствие остаётся ❌.
+ASK_FUNNELS = {
+    "subscription": {
+        "label": "подписка на сообщество",
+        "question": "Почему не используете подписку на сообщество?",
+        "why": "Подписка собирает аудиторию сообщества, которую потом можно использовать в таргетинге и ретаргете: "
+               "аудитории подписчиков относятся к пользовательским аудиториям.",
+    },
+    "leadform": {
+        "label": "лид-форма",
+        "question": "Почему не используете лид-формы?",
+        "why": "Лид-форма — самостоятельная воронка: чем меньше в ней полей, тем выше конверсия, а с уточняющим "
+               "вопросом и быстрым обзвоном она даёт заявки без перехода на сайт.",
+    },
+    "senler": {
+        "label": "Senler",
+        "question": "Почему не используете Senler?",
+        "why": "Senler — рассылки и чат-боты в VK; через него можно собрать подписчиков и довести их до заявки "
+               "сообщениями.",
+    },
+}
+ANSWER_VERDICTS = ("na", "potential")
+
+
+def funnel_status(ds: dict, th: dict) -> dict:
+    """Воронка → (статус, причина): pass / fail / unknown / na. Единый источник для чек-листа, вопросов и находок."""
+    live = [g for g in _live(ds) if _active(g, th)]
+    if not live:
+        return {k: ("na", "нет активных групп") for k, _ in FUNNEL_LABELS}
+    banners = [b for b in ds["banners"] if b["status"] in th["active_statuses"]]
+    objectives = {g["objective"] for g in live}
+    urls = [u.lower() for b in banners for u in b.get("urls") or []]
+    layers_known = any(_layer(g) is not None for g in live)
+    out = {}
+    for key, _ in FUNNEL_LABELS:
+        if key == "retargeting":
+            if not layers_known:
+                out[key] = ("unknown", "слои аудиторий не определены — таргетинги не получены")
+                continue
+            ok = any(_layer(g) == "warm" for g in live)
+        elif key == "senler":
+            if not urls:
+                out[key] = ("unknown", "ссылки объявлений не получены")
+                continue
+            ok = any(m in u for m in th["senler_markers"] for u in urls)
+        else:
+            ok = bool(objectives & set(th["funnel_objectives"][key]))
+        out[key] = ("pass", "") if ok else ("fail", "не используется")
+    return out
+
+
+def absent_ask_funnels(ds: dict, th: dict) -> list:
+    """Ключи воронок из ASK_FUNNELS, которых нет среди живых активных групп."""
+    st = funnel_status(ds, th)
+    return [k for k in ASK_FUNNELS if st[k][0] == "fail"]
+
+
+def load_client_answers(ws) -> dict:
+    """client_answers.json → {ключ воронки: {verdict, answer}}. Нет файла — {}; мусор игнорируется с предупреждением."""
+    path = Path(ws) / "client_answers.json"
+    if not path.is_file():
+        return {}
+
+    def warn(msg):
+        print(f"client_answers.json: {msg} — игнорирую", file=sys.stderr)
+
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        warn(f"не прочитан ({e})")
+        return {}
+    if not isinstance(raw, dict):
+        warn("ожидался объект вида {\"funnel_leadform\": {...}}")
+        return {}
+    out = {}
+    for name, val in raw.items():
+        key = name[len("funnel_"):] if isinstance(name, str) and name.startswith("funnel_") else None
+        if key not in ASK_FUNNELS:
+            warn(f"неизвестный ключ «{name}»")
+        elif not isinstance(val, dict) or val.get("verdict") not in ANSWER_VERDICTS:
+            warn(f"«{name}»: verdict должен быть «na» или «potential»")
+        else:
+            answer = val.get("answer")
+            out[key] = {"verdict": val["verdict"], "answer": answer.strip() if isinstance(answer, str) else ""}
+    return out
+
+
+def funnel_potential_findings(ds: dict, th: dict, answers: dict | None) -> list:
+    out = []
+    absent = set(absent_ask_funnels(ds, th))
+    for key, a in (answers or {}).items():
+        if a["verdict"] != "potential" or key not in absent:
+            continue
+        f = ASK_FUNNELS[key]
+        fnd = finding("funnel_potential", "green", "account", ACCOUNT, f"Потенциал роста: {f['label']}",
+                      {"potential": f["why"], "client_answer": a["answer"]},
+                      f"Обсудить с клиентом запуск воронки «{f['label']}»", conf="medium")
+        fnd["check"] = f"B1.{key}"
+        out.append(fnd)
+    return out
+
+
 # ---------- запуск ----------
 
-def diagnose(ds: dict, th: dict) -> dict:
+def diagnose(ds: dict, th: dict, answers: dict | None = None) -> dict:
     ref, source = reference_cpa(ds, th)
     ctx = {"ref_cpa": ref, "ref_source": source, "evaluated": defaultdict(int)}
     out = []
     for fn in RULES:
         out.extend(fn(ds, th, ctx))
+    out.extend(funnel_potential_findings(ds, th, answers))
     out.sort(key=lambda f: (LEVEL_ORDER[f["level"]], -f["effect_rub"]))
     return {"ref_cpa": ref, "ref_source": source, "findings": out, "evaluated": dict(ctx["evaluated"])}
 
@@ -1044,9 +1161,10 @@ def main(argv=None) -> int:
         from checks import run_checks
         from questions import build_questions
     th = load_thresholds(args.thresholds)
-    result = diagnose(ds, th)
-    result["checklist"] = run_checks(ds, th, result["findings"], result["evaluated"])
-    result["questions"] = build_questions(ds, th, result["findings"])
+    answers = load_client_answers(ws)
+    result = diagnose(ds, th, answers)
+    result["checklist"] = run_checks(ds, th, result["findings"], result["evaluated"], answers)
+    result["questions"] = build_questions(ds, th, result["findings"], answers)
     (ws / "findings.json").write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
     counts = defaultdict(int)
     for f in result["findings"]:
