@@ -460,21 +460,33 @@ def no_exclusions(ds, th, ctx):
 
 @rule
 def too_broad(ds, th, ctx):
+    # Решение по сырым ключам таргетинга: неизвестное — молчим, а не считаем «широко».
+    basic = {"geo", "local_geo", "age", "sex", "fulltime", "pads"}
     out = []
     for g in _live(ds):
-        if not _active(g, th) or _layer(g) is None:  # targetings не получены — широта неизвестна, не молчаливо «широко»
+        if not _active(g, th) or _layer(g) is None:  # targetings не получены — широта неизвестна
             continue
         f = _feat(g)
+        keys = f.get("keys")
+        if keys is None:
+            continue
+        narrowed = bool(f.get("has_interests") or f.get("has_keywords") or f.get("has_communities")
+                        or g["segment_ids"])
+        if any(k not in basic for k in keys) and not narrowed:
+            continue  # неизвестный ключ может быть сужением, которое мы не читаем
+        geo_keys = [k for k in ("geo", "local_geo") if k in keys]
         regions = f.get("regions") or []
-        country = not regions or set(regions) <= set(th["country_region_ids"])
-        span = f.get("age_span") if f.get("age_span") is not None else 100
-        narrowed = f.get("has_interests") or f.get("has_keywords") or g["segment_ids"] or f.get("has_communities")
-        if country and span >= th["broad_age_span"] and not narrowed:
+        if geo_keys and not regions:
+            continue  # формат геотаргетинга не распознан
+        if "age" in keys and f.get("age_span") is None:
+            continue  # формат возраста не распознан
+        country = not geo_keys or set(regions) <= set(th["country_region_ids"])
+        broad_age = "age" not in keys or f["age_span"] >= th["broad_age_span"]
+        if country and broad_age and not narrowed:
             out.append(finding("too_broad", "orange", "group", g,
                                "Слишком широкий таргетинг: вся страна, широкий возраст, без интересов",
                                {"regions": regions, "age_span": f.get("age_span")},
-                               "Сузить: интересы, ключевые фразы, сообщества или сегменты",
-                               effect_rub=0 if g.get("stats_missing") else g["stats"]["spent"]))
+                               "Сузить: интересы, ключевые фразы, сообщества или сегменты"))
     return out
 
 
@@ -504,8 +516,9 @@ def creative_overlap(ds, th, ctx):
 @rule
 def lal_small_source(ds, th, ctx):
     return [finding("lal_small_source", "orange", "segment", s, "LAL собран на слишком маленькой базе",
-                    {"source_size": s["size"], "minimum": th["lal_min_source"]},
-                    f"Пересобрать LAL на базе от {th['lal_min_source']} целевых действий")
+                    {"segment_size": s["size"], "minimum": th["lal_min_source"]},
+                    f"Проверить исходную базу LAL: нужна база от {th['lal_min_source']} целевых действий",
+                    conf="low")
             for s in ds["segments"] if s.get("lal") and isinstance(s.get("size"), int)
             and s["size"] < th["lal_min_source"]]
 
@@ -534,10 +547,12 @@ def manual_placements(ds, th, ctx):
 def cap_too_early(ds, th, ctx):
     out = []
     for g in _measured(ds):
-        if not _active(g, th) or not g.get("max_price_rub"):
+        if not _active(g, th) or not g.get("max_price_rub") or g["objective"] not in th["conversion_objectives"]:
             continue
         w7 = (g.get("windows") or {}).get("7")
-        conv7 = w7["conversions"] if w7 else g["stats"]["conversions"]
+        if w7 is None:  # окно 7 дней не получено — без подмены периодом целиком
+            continue
+        conv7 = w7["conversions"]
         if conv7 < th["learning_min_conversions_per_week"]:
             out.append(finding("cap_too_early", "orange", "group", g,
                                "«Предельная цена» включена до накопления статистики",

@@ -33,11 +33,33 @@ def test_no_exclusions():
 
 
 def test_too_broad():
-    broad = make_group(1, features={"regions": [188], "age_span": None})
-    narrow_geo = make_group(2, features={"regions": [5506], "age_span": None})
-    with_interests = make_group(3, features={"regions": [188], "has_interests": True})
+    broad = make_group(1, features={"keys": ["geo"], "regions": [188], "age_span": None})
+    narrow_geo = make_group(2, features={"keys": ["geo"], "regions": [5506], "age_span": None})
+    with_interests = make_group(3, features={"keys": ["geo", "interests"], "regions": [188], "has_interests": True})
     ds = make_ds([broad, narrow_geo, with_interests])
     assert [f["entity"]["id"] for f in found(ds, "too_broad")] == [1]
+
+
+def test_too_broad_basic_keys_only_fires_and_carries_no_effect():
+    g = make_group(1, features={"keys": ["geo", "sex"], "regions": [188], "sex": [1], "age_span": None})
+    g["stats"] = stats(spent=900)
+    f = found(make_ds([g]), "too_broad")
+    assert len(f) == 1 and f[0]["effect_rub"] == 0
+
+
+def test_too_broad_silent_on_unknown_key():
+    g = make_group(1, features={"keys": ["geo", "some_new_key"], "regions": [188], "age_span": None})
+    assert found(make_ds([g]), "too_broad") == []
+
+
+def test_too_broad_silent_when_geo_unparsable():
+    g = make_group(1, features={"keys": ["geo"], "regions": [], "age_span": None})
+    assert found(make_ds([g]), "too_broad") == []
+
+
+def test_too_broad_silent_when_age_unparsable():
+    g = make_group(1, features={"keys": ["geo", "age"], "regions": [188], "age_span": None})
+    assert found(make_ds([g]), "too_broad") == []
 
 
 def test_too_broad_skips_group_without_received_targeting():
@@ -59,8 +81,10 @@ def test_creative_overlap():
 def test_lal_small_source():
     segs = [{"id": 1, "name": "LAL", "lal": True, "size": 20}, {"id": 2, "name": "LAL2", "lal": True, "size": None},
             {"id": 3, "name": "Посетители", "lal": False, "size": 10}]
-    assert [f["entity"]["id"] for f in found(make_ds([make_group(1, segment_ids=[1, 2, 3])], segments=segs),
-                                           "lal_small_source")] == [1]
+    f = found(make_ds([make_group(1, segment_ids=[1, 2, 3])], segments=segs), "lal_small_source")
+    assert [x["entity"]["id"] for x in f] == [1]
+    assert f[0]["evidence"] == {"segment_size": 20, "minimum": 50} and f[0]["confidence"] == "low"
+    assert "Проверить исходную базу LAL" in f[0]["action"]
 
 
 def test_stale_list():
@@ -82,3 +106,15 @@ def test_cap_too_early():
     ok = make_group(2, max_price_rub=50.0, windows={"7": stats(700, 7000, 70, 20), "14": None, "30": None})
     assert found(make_ds([ok]), "cap_too_early") == []
     assert found(make_ds([make_group(3)]), "cap_too_early") == []
+
+
+def test_cap_too_early_only_for_conversion_objectives():
+    w7 = stats(700, 7000, 70, 0)
+    g = make_group(1, objective="socialengagement", max_price_rub=50.0, windows={"7": w7, "14": None, "30": None})
+    assert found(make_ds([g]), "cap_too_early") == []
+
+
+def test_cap_too_early_silent_without_7day_window():
+    g = make_group(1, max_price_rub=50.0, stats=stats(7000, 70000, 700, 3),
+                   windows={"7": None, "14": None, "30": None})
+    assert found(make_ds([g]), "cap_too_early") == []

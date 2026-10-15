@@ -12,7 +12,7 @@ def stats(spent=0, shows=0, clicks=0, conversions=0, frequency=None):
 FEATURES = {"regions": [], "age_span": None, "sex": [], "has_interests": False, "has_communities": None,
             "has_keywords": None, "has_minus": None, "kw_period": None, "kw_expand": None,
             "has_exclusions": None, "auto_placements": None, "device_adjustments": None,
-            "demo_adjustments": None}
+            "demo_adjustments": None, "keys": []}
 
 
 def make_group(id=1, **kw):

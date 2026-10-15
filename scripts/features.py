@@ -56,6 +56,7 @@ def targeting_features(t, observed: set) -> dict:
     ages = [a for a in (age.get("age_list") or []) if isinstance(a, int)]
     period = first_known(t, KW_PERIOD_KEYS, observed)
     return {
+        "keys": sorted(t.keys()),
         "regions": regions,
         "age_span": (max(ages) - min(ages)) if ages else None,
         "sex": list(t.get("sex") or []),

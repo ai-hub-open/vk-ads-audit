@@ -23,6 +23,11 @@ def test_targeting_basics():
     assert f["has_interests"] is True and f["kw_period"] == 10
 
 
+def test_targeting_keys_recorded():
+    assert targeting_features({"geo": {"regions": [188]}, "sex": ["female"]}, set())["keys"] == ["geo", "sex"]
+    assert targeting_features(None, set())["keys"] == []
+
+
 def test_no_age_is_none_span():
     assert targeting_features({}, set())["age_span"] is None
 
