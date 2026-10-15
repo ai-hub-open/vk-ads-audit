@@ -36,6 +36,12 @@ def test_healthy_checklist_has_no_fails(tmp_path):
     assert fails == ["B1.subscription", "B1.leadform", "B1.senler"]   # воронок этих нет — это не ошибка кабинета
 
 
+def test_healthy_checklist_demonstrates_passes(tmp_path):
+    cl = checklist_of("healthy", tmp_path)
+    st = {c["id"]: c["status"] for b in cl["blocks"] for c in b["checks"]}
+    assert {k: st[k] for k in ("A2", "A3", "C10", "C13", "C15")} == dict.fromkeys(("A2", "A3", "C10", "C13", "C15"), "pass")
+
+
 def test_expert_checklist_mostly_fails(tmp_path):
     cl = checklist_of("expert_1", tmp_path)
     fails = {c["id"] for b in cl["blocks"] for c in b["checks"] if c["status"] == "fail"}

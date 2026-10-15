@@ -74,7 +74,7 @@ def _good_banners(gid, prefix):
              {"image_1080x1350": {"id": gid * 1000 + 2}, "image_1920x1080": {"id": gid * 1000 + 3}},
              {"video_portrait_9_16_15s": {"id": gid * 1000 + 4}}]
     return [{"id": gid * 100 + i, "name": f"{prefix}_креатив{i}_Мск", "status": "active", "moderation_status": "allowed",
-             "created": "2026-09-20 10:00:00", "call_to_action": "sign_up",
+             "created": "2026-09-20 10:00:00", "call_to_action": "sign_up", "erid": f"2VtzqxABCD{gid * 100 + i}",
              "textblocks": {"text_90": {"text": "Запишитесь на бесплатную консультацию"}},
              "urls": {"primary": {"id": 7, "url": "https://site.ru/?utm_source=vk_ads&utm_campaign={{campaign_id}}"}},
              "content": roles[i]} for i in range(3)]
@@ -85,19 +85,23 @@ def healthy(raw: Path) -> dict:
     plans = [{"id": 1, "name": "ретарг_сайт_Мск", "budget_limit_day": 300000},
              {"id": 2, "name": "LAL_клиенты_Мск", "budget_limit_day": 300000},
              {"id": 3, "name": "холод_интересы_Мск", "budget_limit_day": 300000}]
-    segs = [{"id": 101, "name": "Посетители сайта 30 дней"}, {"id": 102, "name": "LAL на клиентов 3%"}]
-    base_t = {"geo": {"regions": [1]}, "age": {"age_list": AGES}}
+    segs = [{"id": 101, "name": "Посетители сайта 30 дней"}, {"id": 102, "name": "LAL на клиентов 3%", "size": 120}]
+    # исключение клиентов и ретаргета; места размещения — автоматические
+    base_t = {"geo": {"regions": [1]}, "age": {"age_list": AGES}, "auto_placements": True}
     groups = [group(1, [1], ad_plan_id=1, name="ретарг_сайт_Мск_Ж25-45_моб",
-                    targetings={**base_t, "sex": ["female"], "segments": [101]}),
+                    targetings={**base_t, "sex": ["female"], "segments": [101],
+                                 "segments_exclude": [601]}),
               group(2, [1], ad_plan_id=2, name="LAL_клиенты_Мск_25-45",
-                    targetings={**base_t, "segments": [102]}),
+                    targetings={**base_t, "segments": [102], "segments_exclude": [101, 601]}),
               group(3, [1], ad_plan_id=3, name="холод_велоспорт_Мск_25-45",
-                    targetings={**base_t, "interests": [1001]})]
+                    targetings={**base_t, "interests": [1001], "segments_exclude": [101, 601]})]
     for g in groups:
-        g["enable_utm"] = True                                            # авто-UTM включена — проверка A3 проходит
+        g["enable_utm"] = False                                           # авто-UTM выключена, но метки есть в ссылках
     bs = {1: _good_banners(1, "ретарг"), 2: _good_banners(2, "LAL"), 3: _good_banners(3, "холод")}
     write_cabinet(raw, groups, bs, {1: (440, 20000, 300, 4), 2: (440, 20000, 300, 4), 3: (220, 10000, 150, 2)},
-                  plans=plans, segment_items=segs)
+                  plans=plans, segment_items=segs,
+                  users_lists=[{"id": 601, "name": "Клиенты", "entries_count": 300,
+                                "updated": "2026-09-25 00:00:00"}])    # база клиентов — для исключения
     return {**P, "target_cpa": 300.0, "expected": set(), "scope": None, "as_of": "2026-10-01T10:00"}
 
 
