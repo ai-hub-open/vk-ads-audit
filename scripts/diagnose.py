@@ -27,6 +27,22 @@ except ImportError:  # запуск напрямую
 LEVEL_ORDER = {"red": 0, "orange": 1, "green": 2, "white": 3}
 DEFAULT_THRESHOLDS = SKILL_ROOT / "references" / "thresholds.json"
 RULES: list = []
+ACCOUNT = {"id": None, "name": "кабинет"}
+CHECK_OF = {
+    "no_pixel": "A1", "ord_missing": "A2", "utm_missing": "A3",
+    "no_retargeting": "B1.retargeting", "layer_missing": "B2", "layer_share": "B3", "mixed_plan": "B4",
+    "fragmentation": "B5", "no_cbo": "B6", "naming": "B7", "autodelete_risk": "B8", "spend_concentration": "B9",
+    "no_minus_phrases": "C7", "kw_period": "C8", "kw_expand_off": "C9", "no_exclusions": "C10",
+    "too_broad": "C11", "duplicate_targeting": "C12", "creative_overlap": "C12", "lal_small_source": "C13",
+    "stale_list": "C14", "unused_segments": "C14", "manual_placements": "C15",
+    "low_budget": "D1", "cap_too_early": "D2", "learning_starved": "D3", "blocking_issues": "D4",
+    "missing_ratios": "E1", "no_video": "E2", "banners_per_group": "E3", "no_active_banners": "E3",
+    "stale_creatives": "E4", "no_cta_text": "E6", "generic_button": "E7", "rejected_banners": "E8",
+    "moderation_stuck": "E9",
+    "low_ctr": "F1", "cpc_outlier": "F2", "burnout": "F3", "cpa_trend": "F4",
+    "spend_no_conversions": "F6", "cpa_above_target": "F6",
+    "high_bounce": "G1", "click_loss": "G2", "goals_without_vk_conversions": "G3",
+}
 
 
 def rule(fn):
@@ -39,7 +55,7 @@ def load_thresholds(path=None) -> dict:
 
 
 def finding(rule_id, level, etype, ent, title, evidence, action, effect_rub=0.0, conf="high") -> dict:
-    return {"rule": rule_id, "level": level,
+    return {"rule": rule_id, "check": CHECK_OF.get(rule_id), "level": level,
             "entity": {"type": etype, "id": ent.get("id"), "name": ent.get("name", "")},
             "title": title, "evidence": evidence, "effect_rub": round(float(effect_rub), 2),
             "confidence": conf, "action": action}
@@ -98,6 +114,33 @@ def _banners_of(ds, g):
     return [b for b in ds["banners"] if b["id"] in ids]
 
 
+def _feat(g) -> dict:
+    return g.get("features") or {}
+
+
+def _layer(g) -> str:
+    return g.get("layer") or "cold"
+
+
+def _active_banners(ds, g, th) -> list:
+    return [b for b in _banners_of(ds, g) if b["status"] in th["active_statuses"]]
+
+
+def _date(s):
+    try:
+        return date.fromisoformat(str(s)[:10]) if s else None
+    except ValueError:
+        return None
+
+
+def _reject_action(b, th) -> str:
+    reasons = json.dumps(b.get("moderation_reasons") or "", ensure_ascii=False).lower()
+    if any(m in reasons for m in th["document_reason_markers"]):
+        return "Загрузить документы в кабинете: Настройки → Документы для модерации — объявление запустится само"
+    return ("Исправить по причине отказа и отправить на перемодерацию" if b["can_remoderate"]
+            else "Исправить и создать заново: перемодерация недоступна")
+
+
 # ---------- гигиена ----------
 
 @rule
@@ -121,8 +164,7 @@ def rejected_banners(ds, th, ctx):
     return [finding("rejected_banners", "orange", "banner", b, "Объявление отклонено модерацией",
                     {"moderation_status": b["moderation_status"], "reasons": b["moderation_reasons"],
                      "can_remoderate": b["can_remoderate"]},
-                    "Исправить по причине отказа и отправить на перемодерацию"
-                    if b["can_remoderate"] else "Исправить и создать заново: перемодерация недоступна")
+                    _reject_action(b, th))
             for b in ds["banners"]
             if b["status"] != "deleted" and b["moderation_status"] in th["rejected_moderation_statuses"]]
 
@@ -164,10 +206,10 @@ def banners_per_group(ds, th, ctx):
         if not _active(g, th) or g["id"] not in covered:
             continue
         n = len([b for b in _banners_of(ds, g) if b["status"] in th["active_statuses"]])
-        if n == 1:
+        if n < th["min_active_banners_per_group"] and n > 0:
             out.append(finding("banners_per_group", "white", "group", g,
                                "В группе одно объявление — алгоритму не из чего выбирать",
-                               {"active_banners": n}, "Добавить 2–4 варианта креатива"))
+                               {"active_banners": n}, "Добавить варианты креатива: норма 2–5 в группе"))
         elif n > th["max_active_banners_per_group"]:
             out.append(finding("banners_per_group", "white", "group", g,
                                "Слишком много объявлений — бюджет размазан, выводы по каждому слабые",
@@ -193,6 +235,10 @@ def low_budget(ds, th, ctx):
                                "Бюджета не хватает на обучение автостратегии",
                                {"budget_day_rub": b, "needed_rub": need, "ref_source": ctx["ref_source"]},
                                f"Дневной бюджет не ниже {need:.0f} ₽ (≥ {th['learning_budget_cpa_multiplier']} × CPA)"))
+        elif b < th["recommended_daily_budget_rub"]:
+            out.append(finding("low_budget", "white", "group", g, "Дневной бюджет на нижней границе",
+                               {"budget_day_rub": b, "recommended_rub": th["recommended_daily_budget_rub"]},
+                               f"Держать не ниже {th['recommended_daily_budget_rub']} ₽ в день, чтобы избежать резкого слива"))
     return out
 
 
@@ -293,6 +339,11 @@ def burnout(ds, th, ctx):
     for g in _measured(ds):
         rows = g["daily"]
         freq = g["stats"]["frequency"]
+        if freq and freq > th["burnout_red_frequency"] and g["stats"]["shows"] >= th["burnout_min_shows"]:
+            out.append(finding("burnout", "red", "group", g, "Частота показа выше 5 — аудитория выжжена",
+                               {"frequency": freq}, "Срочно обновить креативы или расширить аудиторию",
+                               effect_rub=g["stats"]["spent"], conf=confidence(g["stats"]["clicks"], th)))
+            continue
         if len(rows) < 4 or not freq or freq < th["burnout_min_frequency"] \
                 or g["stats"]["shows"] < th["burnout_min_shows"]:
             continue
