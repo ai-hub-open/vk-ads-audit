@@ -323,7 +323,7 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
             "text": banner_text(b.get("textblocks")),
             "urls": url_strings(b.get("urls")),
             **content_features(b.get("content")),
-            "created": b.get("created"),
+            "created": b.get("created"), "updated": b.get("updated"),
             "age_days": (d_to - parse_dt(b["created"]).date()).days if parse_dt(b.get("created")) else None,
             "erid": (None if not any(k in observed_b for k in ERID_KEYS)
                      else str(first_known(b, ERID_KEYS, observed_b) or "")),

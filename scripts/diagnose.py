@@ -593,8 +593,8 @@ def _content_groups(ds, th):
 def missing_ratios(ds, th, ctx):
     out = []
     for g, active in _content_groups(ds, th):
-        if not any(b.get("content_ids") for b in active):   # контент не получен — «не проверено»
-            continue
+        if any(not b.get("content_ids") or not (b.get("ratios") or b.get("has_video")) for b in active):
+            continue   # не все объявления с контентом и классифицированы — «не проверено», молчим
         have = set().union(*(set(b.get("ratios") or []) for b in active))
         missing = [r for r in th["required_ratios"] if r not in have]
         if missing:
@@ -607,6 +607,9 @@ def missing_ratios(ds, th, ctx):
 
 @rule
 def no_video(ds, th, ctx):
+    covered = _banner_groups(ds)
+    if any(g["id"] not in covered for g in _live(ds) if _active(g, th)):   # объявления собраны не по всем группам
+        return []
     active = [b for g, bs in _content_groups(ds, th) for b in bs if b.get("content_ids")]
     if not active or any(b.get("has_video") for b in active):
         return []
@@ -632,10 +635,10 @@ def stale_creatives(ds, th, ctx):
     covered = _banner_groups(ds)
     out = []
     for g in _top_groups(ds, th):
-        ages = [b["age_days"] for b in _active_banners(ds, g, th) if b.get("age_days") is not None]
-        if g["id"] not in covered or not ages:
-            continue
-        newest = min(ages)
+        banners = _active_banners(ds, g, th)
+        if g["id"] not in covered or not banners or any(b.get("age_days") is None for b in banners):
+            continue   # возраст одного из объявлений не известен — свежесть группы не оценить
+        newest = min(b["age_days"] for b in banners)
         if newest > th["creative_stale_red_days"]:
             level = "orange"
         elif newest > th["creative_stale_days"]:
@@ -681,12 +684,14 @@ def moderation_stuck(ds, th, ctx):
         return []
     out = []
     for b in ds["banners"]:
-        created = parse_dt(b.get("created"))
-        if b["status"] == "deleted" or b["moderation_status"] not in th["moderating_statuses"] or not created:
+        stamps = [s for s in (parse_dt(b.get("created")), parse_dt(b.get("updated"))) if s]
+        if b["status"] == "deleted" or b["moderation_status"] not in th["moderating_statuses"] or not stamps:
             continue
-        hours = (as_of - created).total_seconds() / 3600
+        # мерим от последнего события: после правки модерация начинается заново
+        since = max(stamps)
+        hours = (as_of - since).total_seconds() / 3600
         norm = th["moderation_video_hours"] if b.get("has_video") else th["moderation_hours"]
-        if hours > norm:
+        if hours > norm + th["moderation_tz_tolerance_hours"]:
             out.append(finding("moderation_stuck", "orange", "banner", b, "Модерация затянулась",
                                {"hours": round(hours, 1), "norm_hours": norm},
                                "Проверить, не нужны ли документы (Настройки → Документы для модерации), иначе — в поддержку"))
@@ -797,6 +802,7 @@ def cpa_trend(ds, th, ctx):
         w = g.get("windows") or {}
         w7, w30 = w.get("7"), w.get("30")
         if not w7 or not w30 or not w7["cpa"] or not w30["cpa"] \
+                or w7["conversions"] < th["min_conversions_for_cpa"] \
                 or w30["conversions"] < th["min_conversions_for_cpa"]:
             continue
         if w7["cpa"] >= w30["cpa"] * (1 + th["cpa_trend_rise"]):

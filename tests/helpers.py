@@ -32,7 +32,7 @@ def make_banner(id=11, group_id=1, **kw):
     b = {"id": id, "name": f"B{id}", "group_id": group_id, "status": "active", "moderation_status": "allowed",
          "moderation_reasons": None, "issues": [], "can_remoderate": False, "stats": None,
          "cta": None, "text": "", "urls": [], "ratios": [], "has_video": False, "content_ids": [],
-         "created": None, "age_days": None, "erid": None}
+         "created": None, "updated": None, "age_days": None, "erid": None}
     b.update(kw)
     return b
 

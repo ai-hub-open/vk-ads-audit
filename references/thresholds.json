@@ -11,6 +11,7 @@
   "moderating_statuses": ["new", "delayed", "moderating"],
   "moderation_hours": 24,
   "moderation_video_hours": 8,
+  "moderation_tz_tolerance_hours": 3,
   "autodelete_warn_days": 150,
   "min_active_banners_per_group": 2,
   "max_active_banners_per_group": 5,
