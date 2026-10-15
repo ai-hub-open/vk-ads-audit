@@ -21,9 +21,11 @@ from pathlib import Path
 try:
     from scripts._console import setup_console
     from scripts._workspace import SKILL_ROOT, resolve_workspace
+    from scripts.features import parse_dt
 except ImportError:  # запуск напрямую
     from _console import setup_console
     from _workspace import SKILL_ROOT, resolve_workspace
+    from features import parse_dt
 
 LEVEL_ORDER = {"red": 0, "orange": 1, "green": 2, "white": 3}
 DEFAULT_THRESHOLDS = SKILL_ROOT / "references" / "thresholds.json"
@@ -98,6 +100,24 @@ def _is_auto(g, th) -> bool:
 def _run_days(ds, g) -> int:
     rows = g["daily"]
     return sum(1 for r in rows if r["shows"] > 0) if rows else ds["period"]["days"]
+
+
+def _early(ds, g, th) -> bool:
+    return _run_days(ds, g) < th["min_run_days"]
+
+
+def _perf_entities(ds, th) -> list:
+    """Объявления (если собраны и старше 7 дней) и группы (если по ним нет объявлений и работают 7+ дней)."""
+    live = {g["id"]: g for g in _measured(ds)}
+    covered = _banner_groups(ds)
+    banners = [b for b in ds["banners"] if b["stats"] and b["status"] != "deleted" and b["group_id"] in live
+               and b["group_id"] in covered]
+    banner_level = {b["group_id"] for b in banners}
+    out = [("banner", b, b["stats"]) for b in banners
+           if b.get("age_days") is None or b["age_days"] >= th["min_run_days"]]
+    out += [("group", g, g["stats"]) for g in live.values()
+            if g["id"] not in banner_level and not _early(ds, g, th)]
+    return out
 
 
 def reference_cpa(ds, th):
@@ -562,6 +582,117 @@ def cap_too_early(ds, th, ctx):
     return out
 
 
+# ---------- v1: объявления ----------
+
+def _content_groups(ds, th):
+    covered = _banner_groups(ds)
+    return [(g, _active_banners(ds, g, th)) for g in _live(ds) if _active(g, th) and g["id"] in covered]
+
+
+@rule
+def missing_ratios(ds, th, ctx):
+    out = []
+    for g, active in _content_groups(ds, th):
+        if not any(b.get("content_ids") for b in active):   # контент не получен — «не проверено»
+            continue
+        have = set().union(*(set(b.get("ratios") or []) for b in active))
+        missing = [r for r in th["required_ratios"] if r not in have]
+        if missing:
+            out.append(finding("missing_ratios", "orange", "group", g,
+                               "Загружены не все форматы — часть площадок (Клипы, Истории) недоступна",
+                               {"missing": missing, "present": sorted(have)},
+                               "Добавить креативы в форматах: " + ", ".join(missing)))
+    return out
+
+
+@rule
+def no_video(ds, th, ctx):
+    active = [b for g, bs in _content_groups(ds, th) for b in bs if b.get("content_ids")]
+    if not active or any(b.get("has_video") for b in active):
+        return []
+    return [finding("no_video", "white", "account", ACCOUNT, "В кабинете нет видеообъявлений",
+                    {"banners_with_content": len(active)},
+                    "Добавить короткие видео (15–60 с, до 180 с) или автоматические видео из статики")]
+
+
+def _top_groups(ds, th) -> list:
+    gs = sorted([g for g in _measured(ds) if _active(g, th) and g["stats"]["spent"] > 0],
+                key=lambda g: -g["stats"]["spent"])
+    total, acc, out = sum(g["stats"]["spent"] for g in gs), 0.0, []
+    for g in gs:
+        out.append(g)
+        acc += g["stats"]["spent"]
+        if acc >= total * th["top_groups_spend_share"]:
+            break
+    return out
+
+
+@rule
+def stale_creatives(ds, th, ctx):
+    covered = _banner_groups(ds)
+    out = []
+    for g in _top_groups(ds, th):
+        ages = [b["age_days"] for b in _active_banners(ds, g, th) if b.get("age_days") is not None]
+        if g["id"] not in covered or not ages:
+            continue
+        newest = min(ages)
+        if newest > th["creative_stale_red_days"]:
+            level = "orange"
+        elif newest > th["creative_stale_days"]:
+            level = "white"
+        else:
+            continue
+        out.append(finding("stale_creatives", level, "group", g, "Креативы в топ-группе давно не обновлялись",
+                           {"newest_creative_age_days": newest},
+                           "Обновить угол подачи: новый сценарий, боль или оффер (не только дизайн)"))
+    return out
+
+
+@rule
+def no_cta_text(ds, th, ctx):
+    words = [w.lower() for w in th["cta_words"]]
+    out = []
+    for g, active in _content_groups(ds, th):
+        bad = [b["id"] for b in active if (b.get("text") or "").strip()
+               and not any(w in b["text"].lower() for w in words)]
+        if bad:
+            out.append(finding("no_cta_text", "white", "group", g, "В тексте объявлений нет призыва к действию",
+                               {"banners": bad},
+                               "Добавить призыв, совпадающий с посадочной: «Запишитесь», «Узнайте цену», «Получите расчёт»"))
+    return out
+
+
+@rule
+def generic_button(ds, th, ctx):
+    generic = {c.lower() for c in th["generic_cta"]}
+    out = []
+    for g, active in _content_groups(ds, th):
+        bad = [b["id"] for b in active if (b.get("cta") or "").lower() in generic]
+        if bad:
+            out.append(finding("generic_button", "white", "group", g, "Кнопка «Подробнее» вместо конкретного действия",
+                               {"banners": bad}, "Поставить конкретную кнопку: «Записаться», «Узнать цену», «Купить»"))
+    return out
+
+
+@rule
+def moderation_stuck(ds, th, ctx):
+    as_of = parse_dt(ds.get("as_of"))
+    if not as_of:
+        return []
+    out = []
+    for b in ds["banners"]:
+        created = parse_dt(b.get("created"))
+        if b["status"] == "deleted" or b["moderation_status"] not in th["moderating_statuses"] or not created:
+            continue
+        hours = (as_of - created).total_seconds() / 3600
+        norm = th["moderation_video_hours"] if b.get("has_video") else th["moderation_hours"]
+        if hours > norm:
+            out.append(finding("moderation_stuck", "orange", "banner", b, "Модерация затянулась",
+                               {"hours": round(hours, 1), "norm_hours": norm},
+                               "Проверить, не нужны ли документы (Настройки → Документы для модерации), иначе — в поддержку"))
+    return out
+
+
 # ---------- эффективность ----------
 
 @rule
@@ -600,18 +731,11 @@ def cpa_above_target(ds, th, ctx):
 
 @rule
 def low_ctr(ds, th, ctx):
-    live_ids = {g["id"] for g in _live(ds)}
-    with_stats = [b for b in ds["banners"]
-                  if b["stats"] and b["status"] != "deleted" and b["group_id"] in live_ids
-                  and b["group_id"] in _banner_groups(ds)]
-    banner_level = {b["group_id"] for b in with_stats}
-    entities = [("banner", b, b["stats"]) for b in with_stats]
-    entities += [("group", g, g["stats"]) for g in _measured(ds) if g["id"] not in banner_level]
     return [finding("low_ctr", "orange", etype, ent, "Низкий CTR при достаточных показах",
                     {"ctr_pct": s["ctr_pct"], "shows": s["shows"], "threshold_pct": th["low_ctr_pct"]},
                     "Заменить креатив или проверить, той ли аудитории он показывается",
                     effect_rub=s["spent"], conf=confidence(s["clicks"], th))
-            for etype, ent, s in entities
+            for etype, ent, s in _perf_entities(ds, th)
             if s["shows"] >= th["low_ctr_min_shows"] and s["ctr_pct"] < th["low_ctr_pct"]]
 
 
@@ -624,6 +748,8 @@ def _ctr(rows):
 def burnout(ds, th, ctx):
     out = []
     for g in _measured(ds):
+        if _early(ds, g, th):
+            continue
         rows = g["daily"]
         freq = g["stats"]["frequency"]
         if freq and freq > th["burnout_red_frequency"] and g["stats"]["shows"] >= th["burnout_min_shows"]:
@@ -643,6 +769,42 @@ def burnout(ds, th, ctx):
                                 "frequency": freq},
                                "Обновить креативы или расширить аудиторию",
                                effect_rub=sum(r["spent"] for r in rows[half:])))
+    return out
+
+
+@rule
+def cpc_outlier(ds, th, ctx):
+    avg = ds["totals"].get("cpc")
+    if not avg:
+        return []
+    out = []
+    for etype, ent, s in _perf_entities(ds, th):
+        if s["clicks"] >= th["cpc_outlier_min_clicks"] and s["cpc"] and s["cpc"] >= avg * th["cpc_outlier_ratio"] \
+                and s["ctr_pct"] < th["ctr_norm_min_pct"]:
+            out.append(finding("cpc_outlier", "orange", etype, ent, "CPC выше среднего по кабинету при низком CTR",
+                               {"cpc": s["cpc"], "avg_cpc": avg, "ctr_pct": s["ctr_pct"]},
+                               "Отключить или заменить креатив",
+                               effect_rub=max(s["spent"] - s["clicks"] * avg, 0), conf=confidence(s["clicks"], th)))
+    return out
+
+
+@rule
+def cpa_trend(ds, th, ctx):
+    out = []
+    for g in _measured(ds):
+        if not _active(g, th) or _early(ds, g, th):
+            continue
+        w = g.get("windows") or {}
+        w7, w30 = w.get("7"), w.get("30")
+        if not w7 or not w30 or not w7["cpa"] or not w30["cpa"] \
+                or w30["conversions"] < th["min_conversions_for_cpa"]:
+            continue
+        if w7["cpa"] >= w30["cpa"] * (1 + th["cpa_trend_rise"]):
+            out.append(finding("cpa_trend", "orange", "group", g, "CPA за последнюю неделю заметно выше, чем за месяц",
+                               {"cpa_7d": w7["cpa"], "cpa_30d": w30["cpa"], "frequency": g["stats"]["frequency"]},
+                               "Проверить выгорание по частоте, обновить креативы или аудиторию",
+                               effect_rub=max(w7["spent"] - w7["conversions"] * w30["cpa"], 0),
+                               conf=confidence(w7["clicks"], th)))
     return out
 
 
