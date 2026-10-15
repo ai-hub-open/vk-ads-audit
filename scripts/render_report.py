@@ -38,8 +38,10 @@ h1{font-size:22px;margin:0 0 4px}h2{font-size:17px;margin:28px 0 8px;border-bott
 .tile b{display:block;font-size:18px}.f{border:1px solid #e3e3e3;border-radius:8px;padding:10px 14px;margin:8px 0}
 .f h3{font-size:15px;margin:0 0 4px}.f.explained{background:#f6f6f6;color:#555}.note{font-style:italic}table{border-collapse:collapse;width:100%;font-size:13px}
 td,th{border-bottom:1px solid #eee;padding:4px 6px;text-align:left}th{background:#fafafa}
+.score{font-weight:600}.st-pass{color:#1a7f37}.st-fail{color:#c62828}.st-unk{color:#888}
 @media print{body{margin:0}.f{break-inside:avoid}}
 """
+STATUS_ICON = {"pass": "✅", "fail": "❌", "unknown": "—", "na": "—"}
 
 
 def fmt_rub(v) -> str:
@@ -62,7 +64,7 @@ def _num(v) -> str:
     return escape(json.dumps(v, ensure_ascii=False) if isinstance(v, (list, dict)) else str(v))
 
 
-def limitations(ds: dict, collect_log=None) -> list:
+def limitations(ds: dict, collect_log=None, checklist=None) -> list:
     lines = list(ALWAYS_LIMITATIONS)
     cov = ds["coverage"]
     lines.extend(ds.get("notes") or [])
@@ -85,6 +87,10 @@ def limitations(ds: dict, collect_log=None) -> list:
         lines.append("Пиксели кабинета не проверялись.")
     if (collect_log or {}).get("aborted"):
         lines.append(f"Сбор прерван: {collect_log['aborted']}")
+    for b in (checklist or {}).get("blocks", []):
+        for c in b["checks"]:
+            if c["status"] == "unknown":
+                lines.append(f"Не проверено «{c['title']}»: {c['reason']}")
     return lines
 
 
@@ -96,7 +102,8 @@ def _finding_html(f) -> str:
     cls = "f explained" if note_html else "f"
     return (f'<div class="{cls}"><h3>{escape(f["title"])}</h3>'
             f'<p class="muted">{escape(f["entity"]["type"])} {escape(str(f["entity"]["id"]))} · '
-            f'{escape(f["entity"]["name"])} · надёжность: {CONF.get(f["confidence"], f["confidence"])}</p>'
+            f'{escape(f["entity"]["name"])} · надёжность: {CONF.get(f["confidence"], f["confidence"])}'
+            + (f' · проверка {escape(f["check"])}' if f.get("check") else "") + '</p>'
             f'<table>{ev}</table>{effect}<p>Действие: {escape(f["action"])}</p>{note_html}</div>')
 
 
@@ -108,6 +115,31 @@ def _metrika_total_html(total) -> str:
              f"отказы {fmt_pct(bounce * 100) if isinstance(bounce, (int, float)) else '—'}",
              f"достижений целей {_num(total.get('goal_reaches'))}"]
     return f"<p class='muted'>Метрика, весь трафик VK: {' · '.join(parts)}</p>"
+
+
+def _checklist_html(cl) -> str:
+    if not cl:
+        return ""
+    n, m = cl["total"]
+    parts = [f"<h2>Чек-лист аудита — общий балл <span class='score'>{n} / {m}</span></h2>"]
+    for b in cl["blocks"]:
+        bn, bm = b["score"]
+        rows = "".join(
+            f"<tr><td>{escape(c['id'])}</td><td>{escape(c['title'])}</td>"
+            f"<td class='st-{'unk' if c['status'] in ('unknown', 'na') else c['status']}'>{STATUS_ICON[c['status']]}</td>"
+            f"<td class='muted'>{escape(c['reason'])}</td></tr>" for c in b["checks"])
+        parts.append(f"<h3>{escape(b['id'])}. {escape(b['title'])} — {bn} / {bm if bm else '—'}</h3>"
+                     f"<table>{rows}</table>")
+    return "".join(parts)
+
+
+def _questions_html(qs) -> str:
+    if not qs:
+        return ""
+    items = "".join(
+        f"<li>{escape(q['text'])}" + (f" <b>— важно для вашего кабинета: {escape(q['why'])}</b>" if q["important"] else "")
+        + "</li>" for q in sorted(qs, key=lambda q: not q["important"]))
+    return f"<h2>Вопросы к клиенту</h2><ul>{items}</ul>"
 
 
 def render(ds: dict, findings: dict, collect_log=None, title: str = "") -> str:
@@ -124,6 +156,7 @@ def render(ds: dict, findings: dict, collect_log=None, title: str = "") -> str:
              f" · опорный CPA: {fmt_rub(ref)} ({ref_note})</p>",
              "<div class='tiles'>" + "".join(f"<div class='tile'>{k}<b>{v}</b></div>" for k, v in tiles) + "</div>",
              _metrika_total_html(ds.get("metrika_total")),
+             _checklist_html(findings.get("checklist")),
              "<h2>Находки</h2>"]
     if not findings["findings"]:
         parts.append("<p>Существенных проблем не найдено.</p>")
@@ -131,6 +164,7 @@ def render(ds: dict, findings: dict, collect_log=None, title: str = "") -> str:
         items = [f for f in findings["findings"] if f["level"] == level]
         if items:
             parts.append(f"<h2>{label} ({len(items)})</h2>" + "".join(_finding_html(f) for f in items))
+    parts.append(_questions_html(findings.get("questions")))
     rows = "".join(
         f"<tr><td>{escape(g['name'])}</td><td>{escape(str(g['status']))}</td><td>{fmt_rub(g['stats']['spent'])}</td>"
         f"<td>{g['stats']['conversions']}</td><td>{fmt_rub(g['stats']['cpa'])}</td>"
@@ -139,7 +173,8 @@ def render(ds: dict, findings: dict, collect_log=None, title: str = "") -> str:
     parts.append("<h2>Структура</h2><table><tr><th>Группа</th><th>Статус</th><th>Расход</th><th>Конв.</th>"
                  f"<th>CPA</th><th>CTR</th><th>Объявл.</th></tr>{rows}</table>")
     parts.append("<h2>Ограничения</h2><ul>" +
-                 "".join(f"<li>{escape(x)}</li>" for x in limitations(ds, collect_log)) + "</ul></body></html>")
+                 "".join(f"<li>{escape(x)}</li>" for x in limitations(ds, collect_log, findings.get("checklist")))
+                 + "</ul></body></html>")
     return "\n".join(parts)
 
 
