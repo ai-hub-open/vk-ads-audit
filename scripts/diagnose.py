@@ -57,6 +57,11 @@ def load_thresholds(path=None) -> dict:
     return json.loads(Path(path or DEFAULT_THRESHOLDS).read_text(encoding="utf-8"))
 
 
+def _seen(ctx, rule_id, n=1):
+    """Правило реально сравнило n сущностей с порогом (сработало или нет); молчаливые пропуски не считаются."""
+    ctx["evaluated"][rule_id] += n
+
+
 def finding(rule_id, level, etype, ent, title, evidence, action, effect_rub=0.0, conf="high") -> dict:
     return {"rule": rule_id, "check": CHECK_OF.get(rule_id), "level": level,
             "entity": {"type": etype, "id": ent.get("id"), "name": ent.get("name", "")},
@@ -172,6 +177,7 @@ def no_active_banners(ds, th, ctx):
         if not _active(g, th) or g["id"] not in covered:
             continue
         active = [b for b in _banners_of(ds, g) if b["status"] in th["active_statuses"]]
+        _seen(ctx, "no_active_banners")
         if not active or "NO_BANNERS_WITH_ACTIVE_STATUS" in g["issues"]:
             out.append(finding("no_active_banners", "orange", "group", g,
                                "Группа включена, но крутить нечего — нет активных объявлений",
@@ -182,12 +188,17 @@ def no_active_banners(ds, th, ctx):
 
 @rule
 def rejected_banners(ds, th, ctx):
-    return [finding("rejected_banners", "orange", "banner", b, "Объявление отклонено модерацией",
-                    {"moderation_status": b["moderation_status"], "reasons": b["moderation_reasons"],
-                     "can_remoderate": b["can_remoderate"]},
-                    _reject_action(b, th))
-            for b in ds["banners"]
-            if b["status"] != "deleted" and b["moderation_status"] in th["rejected_moderation_statuses"]]
+    out = []
+    for b in ds["banners"]:
+        if b["status"] == "deleted":
+            continue
+        _seen(ctx, "rejected_banners")
+        if b["moderation_status"] in th["rejected_moderation_statuses"]:
+            out.append(finding("rejected_banners", "orange", "banner", b, "Объявление отклонено модерацией",
+                               {"moderation_status": b["moderation_status"], "reasons": b["moderation_reasons"],
+                                "can_remoderate": b["can_remoderate"]},
+                               _reject_action(b, th)))
+    return out
 
 
 @rule
@@ -195,6 +206,8 @@ def blocking_issues(ds, th, ctx):
     out = []
     for g in _live(ds):
         codes = [c for c in g["issues"] if c in th["blocking_issue_codes"]]
+        if _active(g, th):
+            _seen(ctx, "blocking_issues")
         if _active(g, th) and codes:
             out.append(finding("blocking_issues", "orange", "group", g, "VK сообщает, почему группа не крутится",
                                {"issues": codes}, "Устранить причину: " + ", ".join(codes)))
@@ -208,7 +221,10 @@ def autodelete_risk(ds, th, ctx):
     out = []
     end = date.fromisoformat(ds["period"]["to"])
     for g in _measured(ds):
-        if not g.get("created") or g["stats"]["shows"]:
+        if not g.get("created"):
+            continue
+        _seen(ctx, "autodelete_risk")
+        if g["stats"]["shows"]:
             continue
         age = (end - datetime.strptime(g["created"][:10], "%Y-%m-%d").date()).days
         if age >= th["autodelete_warn_days"]:
@@ -227,6 +243,7 @@ def banners_per_group(ds, th, ctx):
         if not _active(g, th) or g["id"] not in covered:
             continue
         n = len([b for b in _banners_of(ds, g) if b["status"] in th["active_statuses"]])
+        _seen(ctx, "banners_per_group")
         if n < th["min_active_banners_per_group"] and n > 0:
             out.append(finding("banners_per_group", "white", "group", g,
                                "В группе одно объявление — алгоритму не из чего выбирать",
@@ -245,6 +262,7 @@ def low_budget(ds, th, ctx):
         b = g["budget_day_rub"]
         if not _active(g, th) or not b:  # None или 0 — дневного лимита нет, сравнивать не с чем
             continue
+        _seen(ctx, "low_budget")
         if b < th["min_daily_budget_rub"]:
             out.append(finding("low_budget", "orange", "group", g, "Дневной бюджет ниже минимума VK",
                                {"budget_day_rub": b, "minimum_rub": th["min_daily_budget_rub"]},
@@ -267,7 +285,8 @@ def low_budget(ds, th, ctx):
 def duplicate_targeting(ds, th, ctx):
     by_key = defaultdict(list)
     for g in _live(ds):
-        if _active(g, th):
+        if _active(g, th) and _layer(g) is not None:   # targetings не получены — ключ «{}» ничего не значит
+            _seen(ctx, "duplicate_targeting")
             by_key[(g["objective"], g["targeting_key"])].append(g)
     out = []
     for gs in by_key.values():
@@ -282,6 +301,7 @@ def duplicate_targeting(ds, th, ctx):
 @rule
 def unused_segments(ds, th, ctx):
     used = {i for g in _live(ds) for i in g["segment_ids"]}
+    _seen(ctx, "unused_segments", len(ds["segments"]))
     return [finding("unused_segments", "white", "segment", s, "Сегмент не используется ни в одной группе",
                     {}, "Удалить или запустить на него группу")
             for s in ds["segments"] if s["id"] not in used]
@@ -289,11 +309,18 @@ def unused_segments(ds, th, ctx):
 
 @rule
 def no_pixel(ds, th, ctx):
-    if ds["pixels"] or not ds["coverage"]["pixels"]:  # пустой список при загруженном запросе — факт
+    if not ds["coverage"]["pixels"]:  # пустой список при загруженном запросе — факт
         return []
-    return [finding("no_pixel", "orange", "group", g, "Цель «конверсии на сайте», а пикселя в кабинете нет",
-                    {"objective": g["objective"]}, "Установить пиксель VK и настроить события")
-            for g in _live(ds) if _active(g, th) and g["objective"] in th["pixel_objectives"]]
+    out = []
+    for g in _live(ds):
+        if not _active(g, th) or g["objective"] not in th["pixel_objectives"]:
+            continue
+        _seen(ctx, "no_pixel")
+        if not ds["pixels"]:
+            out.append(finding("no_pixel", "orange", "group", g,
+                               "Цель «конверсии на сайте», а пикселя в кабинете нет",
+                               {"objective": g["objective"]}, "Установить пиксель VK и настроить события"))
+    return out
 
 
 # ---------- v1: техника и структура ----------
@@ -312,6 +339,7 @@ def ord_missing(ds, th, ctx):
     active = [b for b in ds["banners"] if b["status"] in th["active_statuses"]]
     if not active or all(b.get("erid") is None for b in active):  # поле не получено — «не проверено»
         return []
+    _seen(ctx, "ord_missing", len(active))
     bad = [b for b in active if b.get("erid") == ""]
     if not bad:
         return []
@@ -326,6 +354,7 @@ def utm_missing(ds, th, ctx):
     manual = {g["id"] for g in ds["groups"] if g.get("auto_utm") is False}  # None — не получено, молчим
     site = [b for b in ds["banners"] if b["status"] in th["active_statuses"] and b["group_id"] in manual
             and any(_site_url(u, th) for u in b.get("urls") or [])]
+    _seen(ctx, "utm_missing", len(site))
     bad = [b for b in site if not any("utm_" in u for u in b.get("urls") or [])]
     if not bad:
         return []
@@ -337,7 +366,10 @@ def utm_missing(ds, th, ctx):
 @rule
 def no_retargeting(ds, th, ctx):
     live = [g for g in _live(ds) if _active(g, th) and _layer(g) is not None]
-    if not live or any(_layer(g) == "warm" for g in live):
+    if not live:
+        return []
+    _seen(ctx, "no_retargeting")
+    if any(_layer(g) == "warm" for g in live):
         return []
     return [finding("no_retargeting", "white", "account", ACCOUNT, "В кабинете нет ретаргетинга",
                     {"active_groups": len(live)},
@@ -349,6 +381,7 @@ def layer_missing(ds, th, ctx):
     live = [g for g in _live(ds) if _active(g, th) and _layer(g) is not None]
     if not live:
         return []
+    _seen(ctx, "layer_missing")
     have = {_layer(g) for g in live}
     missing = [x for x in ("lal", "cold") if x not in have]
     if not missing:
@@ -366,6 +399,7 @@ def layer_share(ds, th, ctx):
     total = sum(g["stats"]["spent"] for g in gs)
     if not total:
         return []
+    _seen(ctx, "layer_share")
     by = defaultdict(float)
     for g in gs:
         by[_layer(g)] += g["stats"]["spent"]
@@ -391,6 +425,7 @@ def mixed_plan(ds, th, ctx):
         if _active(g, th) and g.get("ad_plan_id") is not None and _layer(g) is not None:
             by_plan[g["ad_plan_id"]].add(_layer(g))
     plans = {p["id"]: p for p in ds["plans"]}
+    _seen(ctx, "mixed_plan", len(by_plan))
     return [finding("mixed_plan", "white", "plan", plans.get(pid, {"id": pid, "name": ""}),
                     "В одной кампании смешаны разные слои аудиторий", {"layers": sorted(layers)},
                     "Разнести: один сегмент — одна кампания")
@@ -401,6 +436,9 @@ def mixed_plan(ds, th, ctx):
 def fragmentation(ds, th, ctx):
     small = [g for g in _live(ds) if _active(g, th) and g["budget_day_rub"]
              and g["budget_day_rub"] <= th["fragment_budget_rub"]]
+    if not any(_active(g, th) and g["budget_day_rub"] for g in _live(ds)):
+        return []
+    _seen(ctx, "fragmentation")
     if len(small) < th["fragment_min_groups"]:
         return []
     return [finding("fragmentation", "orange", "account", ACCOUNT,
@@ -415,6 +453,7 @@ def no_cbo(ds, th, ctx):
     for g in _live(ds):
         if _active(g, th):
             count[g.get("ad_plan_id")] += 1
+    _seen(ctx, "no_cbo", sum(1 for p in ds["plans"] if p.get("has_budget") is not None and count[p["id"]] >= 2))
     return [finding("no_cbo", "white", "plan", p, "Бюджет на уровне кампании (CBO) не включён",
                     {"groups": count[p["id"]]},
                     "Включить бюджет кампании — алгоритм сам распределит деньги между группами")
@@ -430,6 +469,7 @@ def naming(ds, th, ctx):
     names = [n.strip() for n in names if n and n.strip()]  # пустые названия не считаем ни плохими, ни в общем числе
     if not names:
         return []
+    _seen(ctx, "naming")
     bad = [n for n in names if any(p.fullmatch(n) for p in pats)]
     share = len(bad) / len(names)
     if share < th["default_name_share"]:
@@ -448,6 +488,7 @@ def _kw_groups(ds, th):
 
 @rule
 def no_minus_phrases(ds, th, ctx):
+    _seen(ctx, "no_minus_phrases", sum(1 for g in _kw_groups(ds, th) if _feat(g).get("has_minus") is not None))
     return [finding("no_minus_phrases", "white", "group", g, "Ключевые фразы без минус-фраз", {},
                     "Добавить минус-фразы: нецелевые запросы съедают бюджет")
             for g in _kw_groups(ds, th) if _feat(g).get("has_minus") is False]
@@ -456,6 +497,7 @@ def no_minus_phrases(ds, th, ctx):
 @rule
 def kw_period(ds, th, ctx):
     lo, hi = th["kw_period_days"]
+    _seen(ctx, "kw_period", sum(1 for g in _kw_groups(ds, th) if isinstance(_feat(g).get("kw_period"), int)))
     return [finding("kw_period", "white", "group", g, f"Период поиска ключевых фраз вне {lo}–{hi} дней",
                     {"period_days": _feat(g)["kw_period"]}, f"Поставить период {lo}–{hi} дней")
             for g in _kw_groups(ds, th)
@@ -464,6 +506,7 @@ def kw_period(ds, th, ctx):
 
 @rule
 def kw_expand_off(ds, th, ctx):
+    _seen(ctx, "kw_expand_off", sum(1 for g in _kw_groups(ds, th) if _feat(g).get("kw_expand") is not None))
     return [finding("kw_expand_off", "green", "group", g, "Не включено «Расширить список ключевых фраз»", {},
                     "Включить в блоке «Аудитории» группы: VK добавит близкие запросы и расширит охват")
             for g in _kw_groups(ds, th) if _feat(g).get("kw_expand") is False]
@@ -471,6 +514,9 @@ def kw_expand_off(ds, th, ctx):
 
 @rule
 def no_exclusions(ds, th, ctx):
+    _seen(ctx, "no_exclusions",
+          sum(1 for g in _live(ds) if _active(g, th) and g["objective"] in th["conversion_objectives"]
+              and _feat(g).get("has_exclusions") is not None))
     return [finding("no_exclusions", "orange", "group", g,
                     "Нет минус-аудиторий: реклама показывается тем, кто уже купил", {"objective": g["objective"]},
                     "Исключить текущих клиентов и тех, кто уже совершил конверсию")
@@ -500,6 +546,7 @@ def too_broad(ds, th, ctx):
             continue  # формат геотаргетинга не распознан
         if "age" in keys and f.get("age_span") is None:
             continue  # формат возраста не распознан
+        _seen(ctx, "too_broad")
         country = not geo_keys or set(regions) <= set(th["country_region_ids"])
         broad_age = "age" not in keys or f["age_span"] >= th["broad_age_span"]
         if country and broad_age and not narrowed:
@@ -518,6 +565,7 @@ def creative_overlap(ds, th, ctx):
         if b["status"] in th["active_statuses"] and b["group_id"] in groups:
             for cid in b.get("content_ids") or []:
                 by_content[cid].add(b["group_id"])
+    _seen(ctx, "creative_overlap", len(by_content))
     seen, out = set(), []
     for gids in by_content.values():
         gids = sorted(gids, key=str)
@@ -535,6 +583,7 @@ def creative_overlap(ds, th, ctx):
 
 @rule
 def lal_small_source(ds, th, ctx):
+    _seen(ctx, "lal_small_source", sum(1 for s in ds["segments"] if s.get("lal") and isinstance(s.get("size"), int)))
     return [finding("lal_small_source", "orange", "segment", s, "LAL собран на слишком маленькой базе",
                     {"segment_size": s["size"], "minimum": th["lal_min_source"]},
                     f"Проверить исходную базу LAL: нужна база от {th['lal_min_source']} целевых действий",
@@ -549,6 +598,8 @@ def stale_list(ds, th, ctx):
     out = []
     for lst in ds["users_lists"]:
         d = _date(lst.get("updated"))
+        if d:
+            _seen(ctx, "stale_list")
         if d and (end - d).days > th["list_stale_days"]:
             out.append(finding("stale_list", "white", "list", lst, "База давно не обновлялась",
                                {"days_since_update": (end - d).days},
@@ -558,6 +609,8 @@ def stale_list(ds, th, ctx):
 
 @rule
 def manual_placements(ds, th, ctx):
+    _seen(ctx, "manual_placements",
+          sum(1 for g in _live(ds) if _active(g, th) and _feat(g).get("auto_placements") is not None))
     return [finding("manual_placements", "white", "group", g, "Места размещения выбраны вручную", {},
                     "Включить автоматический выбор площадок — система покажет рекламу там, где она эффективнее")
             for g in _live(ds) if _active(g, th) and _feat(g).get("auto_placements") is False]
@@ -572,6 +625,7 @@ def cap_too_early(ds, th, ctx):
         w7 = (g.get("windows") or {}).get("7")
         if w7 is None:  # окно 7 дней не получено — без подмены периодом целиком
             continue
+        _seen(ctx, "cap_too_early")
         conv7 = w7["conversions"]
         if conv7 < th["learning_min_conversions_per_week"]:
             out.append(finding("cap_too_early", "orange", "group", g,
@@ -595,6 +649,7 @@ def missing_ratios(ds, th, ctx):
     for g, active in _content_groups(ds, th):
         if any(not b.get("content_ids") or not (b.get("ratios") or b.get("has_video")) for b in active):
             continue   # не все объявления с контентом и классифицированы — «не проверено», молчим
+        _seen(ctx, "missing_ratios")
         have = set().union(*(set(b.get("ratios") or []) for b in active))
         missing = [r for r in th["required_ratios"] if r not in have]
         if missing:
@@ -611,7 +666,10 @@ def no_video(ds, th, ctx):
     if any(g["id"] not in covered for g in _live(ds) if _active(g, th)):   # объявления собраны не по всем группам
         return []
     active = [b for g, bs in _content_groups(ds, th) for b in bs if b.get("content_ids")]
-    if not active or any(b.get("has_video") for b in active):
+    if not active:
+        return []
+    _seen(ctx, "no_video")
+    if any(b.get("has_video") for b in active):
         return []
     return [finding("no_video", "white", "account", ACCOUNT, "В кабинете нет видеообъявлений",
                     {"banners_with_content": len(active)},
@@ -638,6 +696,7 @@ def stale_creatives(ds, th, ctx):
         banners = _active_banners(ds, g, th)
         if g["id"] not in covered or not banners or any(b.get("age_days") is None for b in banners):
             continue   # возраст одного из объявлений не известен — свежесть группы не оценить
+        _seen(ctx, "stale_creatives")
         newest = min(b["age_days"] for b in banners)
         if newest > th["creative_stale_red_days"]:
             level = "orange"
@@ -656,6 +715,7 @@ def no_cta_text(ds, th, ctx):
     words = [w.lower() for w in th["cta_words"]]
     out = []
     for g, active in _content_groups(ds, th):
+        _seen(ctx, "no_cta_text", sum(1 for b in active if (b.get("text") or "").strip()))
         bad = [b["id"] for b in active if (b.get("text") or "").strip()
                and not any(w in b["text"].lower() for w in words)]
         if bad:
@@ -670,6 +730,7 @@ def generic_button(ds, th, ctx):
     generic = {c.lower() for c in th["generic_cta"]}
     out = []
     for g, active in _content_groups(ds, th):
+        _seen(ctx, "generic_button", sum(1 for b in active if b.get("cta")))
         bad = [b["id"] for b in active if (b.get("cta") or "").lower() in generic]
         if bad:
             out.append(finding("generic_button", "white", "group", g, "Кнопка «Подробнее» вместо конкретного действия",
@@ -687,6 +748,7 @@ def moderation_stuck(ds, th, ctx):
         stamps = [s for s in (parse_dt(b.get("created")), parse_dt(b.get("updated"))) if s]
         if b["status"] == "deleted" or b["moderation_status"] not in th["moderating_statuses"] or not stamps:
             continue
+        _seen(ctx, "moderation_stuck")
         # мерим от последнего события: после правки модерация начинается заново
         since = max(stamps)
         hours = (as_of - since).total_seconds() / 3600
@@ -707,6 +769,7 @@ def spend_no_conversions(ds, th, ctx):
     out = []
     for g in _measured(ds):
         s = g["stats"]
+        _seen(ctx, "spend_no_conversions")
         if s["conversions"] == 0 and s["spent"] >= limit:
             out.append(finding("spend_no_conversions", "red", "group", g, "Расход без конверсий",
                                {"spent": s["spent"], "clicks": s["clicks"], "limit_rub": round(limit, 2),
@@ -724,6 +787,8 @@ def cpa_above_target(ds, th, ctx):
     out = []
     for g in _measured(ds):
         s = g["stats"]
+        if s["conversions"] >= th["min_conversions_for_cpa"]:
+            _seen(ctx, "cpa_above_target")
         if s["conversions"] >= th["min_conversions_for_cpa"] and s["cpa"] > ref * th["cpa_over_ratio"]:
             over = s["spent"] - s["conversions"] * ref
             out.append(finding("cpa_above_target", "red", "group", g, "CPA заметно выше опорного",
@@ -736,6 +801,7 @@ def cpa_above_target(ds, th, ctx):
 
 @rule
 def low_ctr(ds, th, ctx):
+    _seen(ctx, "low_ctr", sum(1 for _, _, s in _perf_entities(ds, th) if s["shows"] >= th["low_ctr_min_shows"]))
     return [finding("low_ctr", "orange", etype, ent, "Низкий CTR при достаточных показах",
                     {"ctr_pct": s["ctr_pct"], "shows": s["shows"], "threshold_pct": th["low_ctr_pct"]},
                     "Заменить креатив или проверить, той ли аудитории он показывается",
@@ -757,6 +823,8 @@ def burnout(ds, th, ctx):
             continue
         rows = g["daily"]
         freq = g["stats"]["frequency"]
+        if freq and g["stats"]["shows"] >= th["burnout_min_shows"]:
+            _seen(ctx, "burnout")
         if freq and freq > th["burnout_red_frequency"] and g["stats"]["shows"] >= th["burnout_min_shows"]:
             out.append(finding("burnout", "red", "group", g, "Частота показа выше 5 — аудитория выжжена",
                                {"frequency": freq}, "Срочно обновить креативы или расширить аудиторию",
@@ -784,6 +852,8 @@ def cpc_outlier(ds, th, ctx):
         return []
     out = []
     for etype, ent, s in _perf_entities(ds, th):
+        if s["clicks"] >= th["cpc_outlier_min_clicks"] and s["cpc"]:
+            _seen(ctx, "cpc_outlier")
         if s["clicks"] >= th["cpc_outlier_min_clicks"] and s["cpc"] and s["cpc"] >= avg * th["cpc_outlier_ratio"] \
                 and s["ctr_pct"] < th["ctr_norm_min_pct"]:
             out.append(finding("cpc_outlier", "orange", etype, ent, "CPC выше среднего по кабинету при низком CTR",
@@ -805,6 +875,7 @@ def cpa_trend(ds, th, ctx):
                 or w7["conversions"] < th["min_conversions_for_cpa"] \
                 or w30["conversions"] < th["min_conversions_for_cpa"]:
             continue
+        _seen(ctx, "cpa_trend")
         if w7["cpa"] >= w30["cpa"] * (1 + th["cpa_trend_rise"]):
             out.append(finding("cpa_trend", "orange", "group", g, "CPA за последнюю неделю заметно выше, чем за месяц",
                                {"cpa_7d": w7["cpa"], "cpa_30d": w30["cpa"], "frequency": g["stats"]["frequency"]},
@@ -821,6 +892,7 @@ def learning_starved(ds, th, ctx):
         s = g["stats"]
         if not _active(g, th) or not _is_auto(g, th) or s["spent"] <= 0:
             continue
+        _seen(ctx, "learning_starved")
         weeks = max(_run_days(ds, g) / 7, 1)
         per_week = s["conversions"] / weeks
         if per_week < th["learning_min_conversions_per_week"]:
@@ -839,6 +911,7 @@ def spend_concentration(ds, th, ctx):
     total = sum(g["stats"]["spent"] for g in live)
     if len(live) < th["concentration_min_groups"] or not total:
         return []
+    _seen(ctx, "spend_concentration")
     top = max(live, key=lambda g: g["stats"]["spent"])
     share = top["stats"]["spent"] / total
     if share < th["concentration_share"]:
@@ -861,6 +934,7 @@ def scale_leader(ds, th, ctx):
         spend_days = [r["spent"] for r in g["daily"] if r["spent"] > 0]
         if not spend_days:
             continue
+        _seen(ctx, "scale_leader")
         avg = sum(spend_days) / len(spend_days)
         if s["cpa"] <= ref * th["leader_cpa_ratio"] and avg >= b * th["leader_budget_use"]:
             out.append(finding("scale_leader", "green", "group", g, "Лидер упирается в бюджет",
@@ -880,6 +954,8 @@ def _with_metrika(ds, th):
 
 @rule
 def high_bounce(ds, th, ctx):
+    _seen(ctx, "high_bounce",
+          sum(1 for g in _with_metrika(ds, th) if g["metrika"]["visits"] >= th["metrika_min_visits"]))
     return [finding("high_bounce", "orange", "group", g, "Высокий отказ трафика из группы (Метрика)",
                     {"bounce_rate": g["metrika"]["bounce_rate"], "visits": g["metrika"]["visits"]},
                     "Проверить соответствие посадочной обещанию креатива и скорость загрузки",
@@ -895,6 +971,8 @@ def click_loss(ds, th, ctx):
     out = []
     for g in _with_metrika(ds, th):
         clicks, visits = g["stats"]["clicks"], g["metrika"]["visits"]
+        if clicks >= th["click_loss_min_clicks"]:
+            _seen(ctx, "click_loss")
         if clicks >= th["click_loss_min_clicks"] and visits / clicks < th["click_loss_visit_ratio"]:
             out.append(finding("click_loss", "orange", "group", g, "Кликов в VK заметно больше, чем визитов в Метрике",
                                {"clicks": clicks, "visits": visits, "ratio": round(visits / clicks, 3)},
@@ -905,6 +983,7 @@ def click_loss(ds, th, ctx):
 
 @rule
 def goals_without_vk_conversions(ds, th, ctx):
+    _seen(ctx, "goals_without_vk_conversions", len(_with_metrika(ds, th)))
     return [finding("goals_without_vk_conversions", "orange", "group", g,
                     "Цели в Метрике есть, а конверсий в VK нет — пиксель или атрибуция",
                     {"metrika_goal_reaches": g["metrika"]["goal_reaches"], "vk_conversions": 0},
@@ -917,12 +996,12 @@ def goals_without_vk_conversions(ds, th, ctx):
 
 def diagnose(ds: dict, th: dict) -> dict:
     ref, source = reference_cpa(ds, th)
-    ctx = {"ref_cpa": ref, "ref_source": source}
+    ctx = {"ref_cpa": ref, "ref_source": source, "evaluated": defaultdict(int)}
     out = []
     for fn in RULES:
         out.extend(fn(ds, th, ctx))
     out.sort(key=lambda f: (LEVEL_ORDER[f["level"]], -f["effect_rub"]))
-    return {"ref_cpa": ref, "ref_source": source, "findings": out}
+    return {"ref_cpa": ref, "ref_source": source, "findings": out, "evaluated": dict(ctx["evaluated"])}
 
 
 def main(argv=None) -> int:
@@ -944,7 +1023,7 @@ def main(argv=None) -> int:
         from questions import build_questions
     th = load_thresholds(args.thresholds)
     result = diagnose(ds, th)
-    result["checklist"] = run_checks(ds, th, result["findings"])
+    result["checklist"] = run_checks(ds, th, result["findings"], result["evaluated"])
     result["questions"] = build_questions(ds, th, result["findings"])
     (ws / "findings.json").write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
     counts = defaultdict(int)

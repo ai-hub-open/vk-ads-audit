@@ -39,7 +39,7 @@ def _known_feature(groups, key, label):
     return OK if any(_feat(g).get(key) is not None for g in groups) else _unknown(label)
 
 
-def run_checks(ds: dict, th: dict, findings: list) -> dict:
+def run_checks(ds: dict, th: dict, findings: list, evaluated: dict | None = None) -> dict:
     fired = defaultdict(list)
     for f in findings:
         fired[f["rule"]].append(f)
@@ -57,7 +57,11 @@ def run_checks(ds: dict, th: dict, findings: list) -> dict:
         if gate[0]:
             return add(cid, title, gate[0], gate[1])
         hits = [f for r in rules for f in fired.get(r, [])]
-        add(cid, title, "fail" if hits else "pass", f"находок: {len(hits)}" if hits else "")
+        if hits:
+            return add(cid, title, "fail", f"находок: {len(hits)}")
+        if evaluated is not None and sum(evaluated.get(r, 0) for r in rules) == 0:
+            return add(cid, title, "na", "нечего проверять: ни одна сущность не подошла под условия проверки")
+        add(cid, title, "pass")
 
     def present(cid, title, ok, gate=OK):
         if gate[0]:
@@ -67,6 +71,12 @@ def run_checks(ds: dict, th: dict, findings: list) -> dict:
     layer_gate = OK if any(_layer(g) is not None for g in live) else (
         "unknown", "слои аудиторий не определены — таргетинги не получены")
 
+    covered = _banner_groups(ds)
+    partial_gate = ("unknown", "объявления собраны не по всем группам") if any(
+        g["id"] not in covered for g in live) else OK
+    keys_gate = _known_feature(live, "keys", "ключи таргетинга")
+    targeting_gate = ("unknown", "таргетинги не получены") if keys_gate[0] else OK
+
     # A
     pixel_gate = OK
     if not cov.get("pixels", True):
@@ -75,7 +85,8 @@ def run_checks(ds: dict, th: dict, findings: list) -> dict:
         pixel_gate = ("na", "нет групп с целью «конверсии на сайте»")
     by_rules("A1", "Пиксель установлен", ["no_pixel"], pixel_gate)
     by_rules("A2", "Креативы промаркированы (erid)", ["ord_missing"],
-             no_banners if no_banners[0] else _known_banner(banners, "erid", "erid / маркировка ОРД"))
+             _first(no_banners, OK if any(b.get("erid") is not None for b in banners)
+                    else _unknown("erid / маркировка ОРД")))
     by_rules("A3", "UTM-метки на объявлениях", ["utm_missing"],
              _first(no_banners, _known_banner(banners, "urls", "ссылки объявлений"),
                     OK if any(g.get("auto_utm") is not None for g in _live(ds))
@@ -104,13 +115,14 @@ def run_checks(ds: dict, th: dict, findings: list) -> dict:
     by_rules("B9", "Расход распределён по группам", ["spend_concentration"], no_stats)
 
     # C
-    present("C1", "Регионы показа", any(_feat(g).get("regions") for g in live))
+    present("C1", "Регионы показа", any(_feat(g).get("regions") for g in live), targeting_gate)
     present("C2", "Демография (пол, возраст)",
-            any(_feat(g).get("age_span") is not None or len(_feat(g).get("sex") or []) == 1 for g in live))
-    present("C3", "Интересы и поведение", any(_feat(g).get("has_interests") for g in live))
+            any(_feat(g).get("age_span") is not None or len(_feat(g).get("sex") or []) == 1 for g in live),
+            targeting_gate)
+    present("C3", "Интересы и поведение", any(_feat(g).get("has_interests") for g in live), targeting_gate)
     present("C4", "Сообщества", any(_feat(g).get("has_communities") for g in live),
             _known_feature(live, "has_communities", "сообщества"))
-    present("C5", "Пользовательские аудитории", any(g["segment_ids"] for g in live))
+    present("C5", "Пользовательские аудитории", any(g["segment_ids"] for g in live), targeting_gate)
     present("C6", "Ключевые фразы", any(_feat(g).get("has_keywords") for g in live),
             _known_feature(live, "has_keywords", "ключевые фразы"))
     kw = [g for g in live if _feat(g).get("has_keywords")]
@@ -144,26 +156,28 @@ def run_checks(ds: dict, th: dict, findings: list) -> dict:
     content_gate = no_banners if no_banners[0] else (
         OK if any(b.get("content_ids") for b in banners) else _unknown("контент объявлений"))
     classified = any(b.get("ratios") or b.get("has_video") for b in banners)
-    covered = _banner_groups(ds)
-    partial = any(g["id"] not in covered for g in live)
     by_rules("E1", "Все соотношения сторон 1:1, 4:5, 16:9, 9:16", ["missing_ratios"],
-             _first(content_gate, OK if classified else ("unknown", "форматы объявлений не определены")))
+             _first(content_gate, partial_gate, OK if classified else ("unknown", "форматы объявлений не определены")))
     by_rules("E2", "Видео используется", ["no_video"],
-             _first(content_gate, ("unknown", "объявления собраны не по всем активным группам") if partial else OK))
-    by_rules("E3", "Креативов в группе 2–5", ["banners_per_group", "no_active_banners"], no_banners)
+             _first(content_gate, partial_gate))
+    by_rules("E3", "Креативов в группе 2–5", ["banners_per_group", "no_active_banners"],
+             _first(no_banners, partial_gate))
     by_rules("E4", "Свежие креативы в топ-группах", ["stale_creatives"],
-             _first(no_banners, ("unknown", "дата создания известна не у всех объявлений")
+             _first(no_banners, partial_gate, ("unknown", "дата создания известна не у всех объявлений")
                     if any(b.get("age_days") is None for b in banners) else OK))
-    if content_gate[0]:
-        add("E5", "Тестировались разные форматы", *content_gate)
+    classified_banners = [b for b in banners if b.get("ratios") or b.get("has_video")]
+    e5_gate = _first(content_gate, partial_gate,
+                     OK if len(classified_banners) >= 2 else ("unknown", "форматы определены меньше чем у двух объявлений"))
+    if e5_gate[0]:
+        add("E5", "Тестировались разные форматы", *e5_gate)
     else:
-        sigs = {(tuple(b.get("ratios") or []), bool(b.get("has_video"))) for b in banners if b.get("content_ids")}
+        sigs = {(tuple(b.get("ratios") or []), bool(b.get("has_video"))) for b in classified_banners}
         add("E5", "Тестировались разные форматы", "pass" if len(sigs) > 1 else "fail",
             "" if len(sigs) > 1 else "все объявления одного формата")
     by_rules("E6", "Призыв к действию в тексте", ["no_cta_text"],
-             no_banners if no_banners[0] else _known_banner(banners, "text", "текст объявления"))
+             _first(no_banners, partial_gate, _known_banner(banners, "text", "текст объявления")))
     by_rules("E7", "Конкретная кнопка", ["generic_button"],
-             no_banners if no_banners[0] else _known_banner(banners, "cta", "кнопка объявления"))
+             _first(no_banners, partial_gate, _known_banner(banners, "cta", "кнопка объявления")))
     by_rules("E8", "Нет отклонённых объявлений", ["rejected_banners"], no_banners)
     by_rules("E9", "Модерация не затянулась", ["moderation_stuck"], no_banners)
 
