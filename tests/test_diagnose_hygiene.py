@@ -4,10 +4,12 @@ from scripts.diagnose import diagnose, load_thresholds, main, reference_cpa
 from tests.helpers import make_banner, make_ds, make_group, stats
 
 TH = load_thresholds()
+HYGIENE = {"no_active_banners", "rejected_banners", "blocking_issues", "autodelete_risk", "banners_per_group",
+           "low_budget", "duplicate_targeting", "unused_segments", "no_pixel"}
 
 
 def rules(ds):
-    return [(f["rule"], f["entity"]["id"]) for f in diagnose(ds, TH)["findings"]]
+    return [(f["rule"], f["entity"]["id"]) for f in diagnose(ds, TH)["findings"] if f["rule"] in HYGIENE]
 
 
 def healthy_banners(gid, n=3):
@@ -133,6 +135,36 @@ def test_sorted_by_level_then_effect():
     levels = [f["level"] for f in diagnose(ds, TH)["findings"]]
     order = {"red": 0, "orange": 1, "green": 2, "white": 3}
     assert levels == sorted(levels, key=order.get)
+
+
+def test_finding_has_check_id():
+    f = diagnose(make_ds([make_group(1, budget_day_rub=200.0)], healthy_banners(1)), TH)["findings"]
+    assert {x["rule"]: x["check"] for x in f}["low_budget"] == "D1"
+
+
+def test_low_budget_white_band():
+    f = [x for x in diagnose(make_ds([make_group(1, budget_day_rub=400.0)], healthy_banners(1)), TH)["findings"]
+         if x["rule"] == "low_budget"]
+    assert [x["level"] for x in f] == ["white"]
+
+
+def test_learning_budget_band_wins_over_white_band():
+    g = make_group(1, autobidding_mode="max_goals", budget_day_rub=400.0)
+    f = [x for x in diagnose(make_ds([g], healthy_banners(1), target_cpa=500), TH)["findings"]
+         if x["rule"] == "low_budget"]
+    assert [(x["level"], "needed_rub" in x["evidence"]) for x in f] == [("orange", True)]
+
+
+def test_banners_per_group_norm_2_to_5():
+    assert ("banners_per_group", 2) in rules(make_ds([make_group(2)], healthy_banners(2, n=6)))
+    assert ("banners_per_group", 3) not in rules(make_ds([make_group(3)], healthy_banners(3, n=5)))
+
+
+def test_rejected_for_documents_points_to_settings():
+    b = make_banner(19, 1, moderation_status="banned", moderation_reasons=["Нужны документы на услугу"])
+    f = [x for x in diagnose(make_ds([make_group(1)], healthy_banners(1) + [b]), TH)["findings"]
+         if x["rule"] == "rejected_banners"][0]
+    assert "Документы для модерации" in f["action"]
 
 
 def test_missing_dataset_reports_and_returns_2(tmp_path, capsys):

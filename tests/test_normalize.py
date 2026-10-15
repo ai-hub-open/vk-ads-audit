@@ -373,3 +373,109 @@ def test_null_names_become_empty(tmp_path):
     write_call(raw, "vk_ads_remarketing_segments_list", {}, {"items": [{"id": 5, "name": None}]})
     ds = build_dataset(raw, "2026-09-01", "2026-09-30")
     assert ds["groups"][0]["name"] == "" and ds["banners"][0]["name"] == "" and ds["segments"][0]["name"] == ""
+
+
+def test_v1_fields(tmp_path):
+    raw = tmp_path / "raw"
+    groups = [{"id": 1, "name": "G1", "status": "active", "objective": "site_conversions", "ad_plan_id": 7,
+               "max_price": "50.00", "enable_utm": True,
+               "targetings": {"geo": {"regions": [1]}, "segments": [102], "keywords": ["велосипед"]}},
+              {"id": 2, "name": "G2", "status": "active", "objective": "site_conversions", "ad_plan_id": 7,
+               "targetings": {"geo": {"regions": [1]}}}]
+    cabinet(raw, groups, banners_by_group={1: [{"id": 11, "status": "active", "created": "2026-09-20 10:00:00",
+                                                "call_to_action": "sign_up", "erid": "Kra23",
+                                                "textblocks": {"text_90": {"text": "Запишитесь"}},
+                                                "urls": {"primary": {"id": 3, "url": "https://s.ru/?utm_source=vk"}},
+                                                "content": {"image_1080x1080": {"id": 50}}}]},
+            summary={1: base(spent="100", shows=1000, clicks=10)})
+    write_call(raw, "vk_ads_remarketing_segments_list", {"paginated": True},
+               {"items": [{"id": 102, "name": "LAL клиенты", "size": 40}]})
+    write_call(raw, "vk_ads_users_lists_list", {"paginated": True},
+               {"items": [{"id": 5, "name": "Клиенты", "entries_count": 900, "updated": "2026-05-01 00:00:00"}]})
+    ds = build_dataset(raw, "2026-09-01", "2026-09-30", as_of="2026-10-01T10:00")
+    g1, g2 = ds["groups"]
+    assert g1["layer"] == "lal" and g2["layer"] == "cold"
+    assert g1["features"]["has_keywords"] is True and g2["features"]["has_keywords"] is False
+    assert g1["max_price_rub"] == 50.0 and g2["max_price_rub"] is None
+    assert g1["auto_utm"] is True and g2["auto_utm"] is False
+    b = ds["banners"][0]
+    assert b["cta"] == "sign_up" and b["text"] == "Запишитесь" and b["erid"] == "Kra23"
+    assert b["urls"] == ["https://s.ru/?utm_source=vk"] and b["ratios"] == ["1:1"] and b["content_ids"] == [50]
+    assert b["age_days"] == 10
+    assert ds["segments"][0]["lal"] is True and ds["segments"][0]["size"] == 40
+    assert ds["users_lists"][0] == {"id": 5, "name": "Клиенты", "size": 900, "updated": "2026-05-01 00:00:00"}
+    assert ds["as_of"] == "2026-10-01T10:00"
+
+
+def test_erid_unknown_when_field_absent(tmp_path):
+    raw = tmp_path / "raw"
+    cabinet(raw, [{"id": 1, "name": "G1", "status": "active"}],
+            banners_by_group={1: [{"id": 11, "status": "active"}]}, summary={})
+    assert build_dataset(raw, "2026-09-01", "2026-09-30")["banners"][0]["erid"] is None
+
+
+def test_plan_budget_known(tmp_path):
+    raw = tmp_path / "raw"
+    cabinet(raw, [])
+    write_call(raw, "vk_ads_ad_plans_list", {"paginated": True},
+               {"items": [{"id": 8, "name": "P", "budget_limit_day": 300000}, {"id": 9, "name": "Q"}]})
+    plans = {p["id"]: p for p in build_dataset(raw, "2026-09-01", "2026-09-30")["plans"]}
+    assert plans[8]["has_budget"] is True and plans[8]["budget_day_rub"] == 3000.0
+    assert plans[9]["has_budget"] is False
+
+
+def test_windows(tmp_path):
+    raw = tmp_path / "raw"
+    rows = [{"date": f"2026-09-{d:02d}", **base(spent="100", shows=1000, clicks=10, goals=1)} for d in range(1, 31)]
+    cabinet(raw, [{"id": 1, "name": "G1", "status": "active"}], daily={1: rows})
+    g = build_dataset(raw, "2026-09-01", "2026-09-30")["groups"][0]
+    assert g["windows"]["7"]["spent"] == 700.0 and g["windows"]["30"]["spent"] == 3000.0
+
+
+def test_windows_short_period(tmp_path):
+    raw = tmp_path / "raw"
+    P10 = {"date_from": "2026-09-21", "date_to": "2026-09-30", "metrics": "all"}
+    write_call(raw, "vk_ads_campaigns_list", {"paginated": True}, {"items": [{"id": 1, "name": "G", "status": "active"}]})
+    write_call(raw, "vk_ads_statistics_day", {"entity": "campaigns", **P10},
+               {"items": [{"id": 1, "rows": [{"date": f"2026-09-{d}", **base(spent="10", shows=100, clicks=1)}
+                                             for d in range(21, 31)]}]})
+    g = build_dataset(raw, "2026-09-21", "2026-09-30")["groups"][0]
+    assert g["windows"]["7"] is not None and g["windows"]["14"] is None and g["windows"]["30"] is None
+
+
+def test_excluded_segments_are_not_targeting():
+    from scripts.normalize import _segment_ids
+    assert _segment_ids({"segments": [1], "segments_exclude": [2]}) == [1]
+
+
+def test_windows_empty_are_none(tmp_path):
+    raw = tmp_path / "raw"
+    cabinet(raw, [{"id": 1, "name": "G1", "status": "active"}], summary={1: base(spent="100", shows=1000, clicks=10)})
+    ds = build_dataset(raw, "2026-09-01", "2026-09-30")
+    assert ds["groups"][0]["windows"] == {"7": None, "14": None, "30": None}
+    assert ds["totals_windows"] == {"7": None, "14": None, "30": None}
+
+
+def test_windows_partial_rows(tmp_path):
+    raw = tmp_path / "raw"
+    rows = [{"date": f"2026-09-{d:02d}", **base(spent="100", shows=1000, clicks=10)} for d in range(1, 11)]
+    cabinet(raw, [{"id": 1, "name": "G1", "status": "active"}], daily={1: rows})
+    ds = build_dataset(raw, "2026-09-01", "2026-09-30")
+    assert ds["groups"][0]["windows"]["7"] is None and ds["groups"][0]["windows"]["30"]["spent"] == 1000.0
+    assert ds["totals_windows"]["7"] is None and ds["totals_windows"]["30"] is not None
+
+
+def test_non_numeric_max_price_is_none():
+    from scripts.normalize import _price
+    assert _price("abc") is None and _price("12,5") == 12.5
+
+
+def test_layer_unknown_without_targetings_key(tmp_path):
+    raw = tmp_path / "raw"
+    groups = [{"id": 1, "name": "G1", "status": "active", "objective": "site_conversions", "ad_plan_id": 7},
+              {"id": 2, "name": "G2", "status": "active", "objective": "site_conversions", "ad_plan_id": 7,
+               "targetings": {"geo": {"regions": [1]}}}]
+    cabinet(raw, groups)
+    ds = build_dataset(raw, "2026-09-01", "2026-09-30", as_of="2026-10-01T10:00")
+    g1, g2 = ds["groups"]
+    assert g1["layer"] is None and g2["layer"] == "cold"

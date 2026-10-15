@@ -6,7 +6,8 @@ from datetime import date
 import pytest
 
 from scripts import collect as collect_mod
-from scripts.collect import STATS_CHUNK, RawNotEmptyError, clamp_date_to, collect
+from scripts.collect import (BANNER_FIELDS_BASE, GROUP_FIELDS_BASE, STATS_CHUNK, RawNotEmptyError, clamp_date_to,
+                             collect)
 from scripts.mcp_client import ALLOWED_TOOLS, ForbiddenToolError, McpError
 
 URL = "https://vkads-mcp.aihub.click.ru/c/TOKEN123456789"
@@ -185,12 +186,49 @@ def test_failed_banners_of_one_group_continues(tmp_path, monkeypatch):
     rc = collect_mod.main(["--workspace", str(tmp_path / "ws"), "--date-from", "2026-09-01",
                            "--date-to", "2026-09-30"])
     assert rc == 0
-    assert [a["campaign_id"] for a in tools(client, "vk_ads_banners_list")] == [1, 2]
+    assert [a["campaign_id"] for a in tools(client, "vk_ads_banners_list")] == [1, 2, 2]  # группа 2: и повтор с базой
     summary = [a for a in tools(client, "vk_ads_statistics_summary") if a["entity"] == "banners"]
     assert summary[0]["ids"] == "100,101"
     log = read_log(tmp_path / "ws")
-    assert log["errors"] == 1
+    assert log["errors"] == 2  # расширенные поля и повтор с базовыми — оба вызова группы 2 упали
     assert log["critical"] is False
+
+
+class RejectsExtendedFields(FakeClient):
+    """Сервер отвергает расширенный список fields (имена, которых он не знает)."""
+
+    def paginate(self, tool, arguments=None, **kw):
+        if tool == "vk_ads_campaigns_list" and arguments["fields"] != GROUP_FIELDS_BASE:
+            self._check(tool, arguments)
+            raise McpError(f"{tool}: HTTP 400 unknown field", status=400)
+        if tool == "vk_ads_banners_list" and arguments["fields"] != BANNER_FIELDS_BASE:
+            self._check(tool, arguments)
+            raise McpError(f"{tool}: HTTP 400 unknown field", status=400)
+        return super().paginate(tool, arguments, **kw)
+
+
+def test_extended_fields_requested_first_single_call(tmp_path):
+    client = FakeClient(groups(2))
+    log = collect(client, tmp_path / "raw", "2026-09-01", "2026-09-30")
+    assert log["errors"] == 0
+    g = tools(client, "vk_ads_campaigns_list")
+    assert len(g) == 1 and "auto_utm" in g[0]["fields"] and g[0]["fields"] != GROUP_FIELDS_BASE
+    b = tools(client, "vk_ads_banners_list")
+    assert len(b) == 2 and all("call_to_action" in a["fields"] for a in b)
+
+
+def test_extended_fields_rejected_retries_with_base(tmp_path):
+    client = RejectsExtendedFields(groups(2))
+    log = collect(client, tmp_path / "raw", "2026-09-01", "2026-09-30")
+    assert log["critical"] is False
+    g = tools(client, "vk_ads_campaigns_list")
+    assert [a["fields"] == GROUP_FIELDS_BASE for a in g] == [False, True]
+    b = tools(client, "vk_ads_banners_list")
+    assert [a["fields"] == BANNER_FIELDS_BASE for a in b] == [False, True, True]  # после отказа база сразу
+    assert log["errors"] == 2  # упавшие расширенные вызовы остаются в журнале
+    assert (tmp_path / "raw" / "vk_ads_campaigns_list__000.json").is_file()
+    summary = [a for a in tools(client, "vk_ads_statistics_summary") if a["entity"] == "banners"]
+    assert summary[0]["ids"] == "100,101,200,201"
 
 
 def test_bad_mode_rejected(tmp_path):
