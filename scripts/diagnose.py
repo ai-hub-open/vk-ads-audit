@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import statistics
 import sys
 from collections import defaultdict
@@ -273,6 +274,148 @@ def no_pixel(ds, th, ctx):
     return [finding("no_pixel", "orange", "group", g, "Цель «конверсии на сайте», а пикселя в кабинете нет",
                     {"objective": g["objective"]}, "Установить пиксель VK и настроить события")
             for g in _live(ds) if _active(g, th) and g["objective"] in th["pixel_objectives"]]
+
+
+# ---------- v1: техника и структура ----------
+
+def _site_url(u: str, th) -> bool:
+    if not u.startswith("http"):
+        return False
+    host = re.sub(r"^https?://", "", u).split("/")[0].lower()
+    return not any(host == h or host.endswith("." + h) for h in th["internal_hosts"])
+
+
+@rule
+def ord_missing(ds, th, ctx):
+    active = [b for b in ds["banners"] if b["status"] in th["active_statuses"]]
+    if not active or all(b.get("erid") is None for b in active):  # поле не получено — «не проверено»
+        return []
+    bad = [b for b in active if b.get("erid") == ""]
+    if not bad:
+        return []
+    return [finding("ord_missing", "orange", "account", ACCOUNT, "Объявления без маркировки ОРД (erid)",
+                    {"banners_without_erid": len(bad), "banners_active": len(active),
+                     "examples": [b["id"] for b in bad[:5]]},
+                    "Включить автоматическую маркировку в кабинете и проверить данные рекламодателя")]
+
+
+@rule
+def utm_missing(ds, th, ctx):
+    auto = {g["id"] for g in ds["groups"] if g.get("auto_utm")}
+    site = [b for b in ds["banners"] if b["status"] in th["active_statuses"]
+            and any(_site_url(u, th) for u in b.get("urls") or [])]
+    bad = [b for b in site if b["group_id"] not in auto
+           and not any("utm_" in u for u in b.get("urls") or [])]
+    if not bad:
+        return []
+    return [finding("utm_missing", "orange", "account", ACCOUNT, "Ссылки на сайт без UTM-меток",
+                    {"without_utm": len(bad), "site_banners": len(site), "examples": [b["id"] for b in bad[:5]]},
+                    "Разметить все ссылки UTM — иначе не понять, какие объявления приводят целевой трафик")]
+
+
+@rule
+def no_retargeting(ds, th, ctx):
+    live = [g for g in _live(ds) if _active(g, th)]
+    if not live or any(_layer(g) == "warm" for g in live):
+        return []
+    return [finding("no_retargeting", "white", "account", ACCOUNT, "В кабинете нет ретаргетинга",
+                    {"active_groups": len(live)},
+                    "Добавить группы на посетителей сайта, вовлечённых в сообщество и досмотревших видео")]
+
+
+@rule
+def layer_missing(ds, th, ctx):
+    live = [g for g in _live(ds) if _active(g, th)]
+    if not live:
+        return []
+    have = {_layer(g) for g in live}
+    missing = [x for x in ("lal", "cold") if x not in have]
+    if not missing:
+        return []
+    names = {"lal": "похожие (LAL)", "cold": "холодный"}
+    return [finding("layer_missing", "white", "account", ACCOUNT,
+                    "Не хватает слоя аудиторий: " + ", ".join(names[m] for m in missing),
+                    {"missing_layers": missing},
+                    "Добавить слой: LAL на клиентов и лиды или холодный тест на интересах и контексте")]
+
+
+@rule
+def layer_share(ds, th, ctx):
+    gs = [g for g in _measured(ds) if g["stats"]["spent"] > 0]
+    total = sum(g["stats"]["spent"] for g in gs)
+    if not total:
+        return []
+    by = defaultdict(float)
+    for g in gs:
+        by[_layer(g)] += g["stats"]["spent"]
+    month = total / ds["period"]["days"] * 30
+    if month < th["small_budget_month_rub"]:
+        target = th["layer_shares_small"]
+        actual = {"warm_lal": (by["warm"] + by["lal"]) / total, "cold": by["cold"] / total}
+    else:
+        target = th["layer_shares"]
+        actual = {k: by[k] / total for k in target}
+    if all(abs(actual[k] - target[k]) <= th["layer_share_tolerance"] for k in target):
+        return []
+    return [finding("layer_share", "white", "account", ACCOUNT, "Доли бюджета по слоям далеки от рекомендованных",
+                    {"actual": {k: round(v, 3) for k, v in actual.items()}, "target": target,
+                     "month_spend_rub": round(month, 2)},
+                    "Перераспределить бюджет между тёплым, LAL и холодным слоями")]
+
+
+@rule
+def mixed_plan(ds, th, ctx):
+    by_plan = defaultdict(set)
+    for g in _live(ds):
+        if _active(g, th) and g.get("ad_plan_id") is not None:
+            by_plan[g["ad_plan_id"]].add(_layer(g))
+    plans = {p["id"]: p for p in ds["plans"]}
+    return [finding("mixed_plan", "white", "plan", plans.get(pid, {"id": pid, "name": ""}),
+                    "В одной кампании смешаны разные слои аудиторий", {"layers": sorted(layers)},
+                    "Разнести: один сегмент — одна кампания")
+            for pid, layers in by_plan.items() if len(layers) > 1]
+
+
+@rule
+def fragmentation(ds, th, ctx):
+    small = [g for g in _live(ds) if _active(g, th) and g["budget_day_rub"]
+             and g["budget_day_rub"] <= th["fragment_budget_rub"]]
+    if len(small) < th["fragment_min_groups"]:
+        return []
+    return [finding("fragmentation", "orange", "account", ACCOUNT,
+                    "Кабинет раздроблен на мелкие группы — алгоритму не хватает конверсий для обучения",
+                    {"small_groups": len(small), "budget_max_rub": th["fragment_budget_rub"]},
+                    "Укрупнить аудитории и объединить группы")]
+
+
+@rule
+def no_cbo(ds, th, ctx):
+    count = defaultdict(int)
+    for g in _live(ds):
+        if _active(g, th):
+            count[g.get("ad_plan_id")] += 1
+    return [finding("no_cbo", "white", "plan", p, "Бюджет на уровне кампании (CBO) не включён",
+                    {"groups": count[p["id"]]},
+                    "Включить бюджет кампании — алгоритм сам распределит деньги между группами")
+            for p in ds["plans"] if p.get("has_budget") is False and count[p["id"]] >= 2]
+
+
+@rule
+def naming(ds, th, ctx):
+    pats = [re.compile(p, re.I) for p in th["default_name_patterns"]]
+    names = ([p["name"] for p in ds["plans"] if p.get("status") != "deleted"]
+             + [g["name"] for g in _live(ds)]
+             + [b["name"] for b in ds["banners"] if b["status"] != "deleted"])
+    if not names:
+        return []
+    bad = [n for n in names if not n.strip() or any(p.fullmatch(n.strip()) for p in pats)]
+    share = len(bad) / len(names)
+    if share < th["default_name_share"]:
+        return []
+    return [finding("naming", "white", "account", ACCOUNT, "Названия не говорят, что внутри",
+                    {"default_names": len(bad), "total": len(names), "share": round(share, 3),
+                     "examples": bad[:5]},
+                    "Называть по схеме сегмент_гео_пол-возраст_устройство (например, «конкур_Кар_Ж20-45_моб»)")]
 
 
 # ---------- эффективность ----------
