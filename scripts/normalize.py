@@ -208,7 +208,10 @@ def _entity_stats(raw_dir: Path, tool: str, entity: str, period: tuple) -> tuple
 def _price(v):
     if v in (None, ""):
         return None
-    p = round(money(v), 2)
+    try:
+        p = round(money(v), 2)
+    except ValueError:
+        return None
     return p or None
 
 
@@ -230,7 +233,7 @@ def windows_of(daily: list, d_from: date, d_to: date) -> dict:
             out[str(n)] = None
             continue
         rows = [r for r in daily if r.get("date") and start.isoformat() <= r["date"] <= d_to.isoformat()]
-        out[str(n)] = aggregate(rows)
+        out[str(n)] = aggregate(rows) if rows else None
     return out
 
 

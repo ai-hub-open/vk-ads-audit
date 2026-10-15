@@ -58,3 +58,16 @@ def test_layers():
     assert layer_of([101, 102], segs) == "lal"
     assert is_lal(segs[103]) and not is_lal({"name": "Галактика"})
     assert layer_of([999], segs) == "warm"   # сегмента нет в списке — считаем ретаргетом
+
+
+def test_icons_do_not_count_as_ratios():
+    f = content_features({"icon_256x256": {"id": 1}})
+    assert f["ratios"] == [] and f["has_video"] is False and f["content_ids"] == [1]
+    assert content_features({"icon_256x256": {"id": 1}, "image_1080x1350": {"id": 2}})["ratios"] == ["4:5"]
+
+
+def test_first_known_skips_null():
+    from scripts.features import ERID_KEYS, first_known
+    d = {"erid": None, "ord_token": "Kra"}
+    assert first_known(d, ERID_KEYS, observed_keys([d])) == "Kra"
+    assert first_known(d, ERID_KEYS, set()) is None

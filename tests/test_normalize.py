@@ -446,3 +446,25 @@ def test_windows_short_period(tmp_path):
 def test_excluded_segments_are_not_targeting():
     from scripts.normalize import _segment_ids
     assert _segment_ids({"segments": [1], "segments_exclude": [2]}) == [1]
+
+
+def test_windows_empty_are_none(tmp_path):
+    raw = tmp_path / "raw"
+    cabinet(raw, [{"id": 1, "name": "G1", "status": "active"}], summary={1: base(spent="100", shows=1000, clicks=10)})
+    ds = build_dataset(raw, "2026-09-01", "2026-09-30")
+    assert ds["groups"][0]["windows"] == {"7": None, "14": None, "30": None}
+    assert ds["totals_windows"] == {"7": None, "14": None, "30": None}
+
+
+def test_windows_partial_rows(tmp_path):
+    raw = tmp_path / "raw"
+    rows = [{"date": f"2026-09-{d:02d}", **base(spent="100", shows=1000, clicks=10)} for d in range(1, 11)]
+    cabinet(raw, [{"id": 1, "name": "G1", "status": "active"}], daily={1: rows})
+    ds = build_dataset(raw, "2026-09-01", "2026-09-30")
+    assert ds["groups"][0]["windows"]["7"] is None and ds["groups"][0]["windows"]["30"]["spent"] == 1000.0
+    assert ds["totals_windows"]["7"] is None and ds["totals_windows"]["30"] is not None
+
+
+def test_non_numeric_max_price_is_none():
+    from scripts.normalize import _price
+    assert _price("abc") is None and _price("12,5") == 12.5

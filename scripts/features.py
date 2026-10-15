@@ -45,7 +45,7 @@ def first_known(d: dict, keys, observed: set):
     """Значение первого известного ключа; None — если ни один ключ не встречался в кабинете."""
     if not any(k in observed for k in keys):
         return None
-    return next((d[k] for k in keys if k in d), None)
+    return next((d[k] for k in keys if d.get(k) is not None), None)
 
 
 def targeting_features(t, observed: set) -> dict:
@@ -89,6 +89,8 @@ def content_features(content) -> dict:
         video = video or r.startswith("video")
         if isinstance(item, dict) and item.get("id") is not None:
             ids.append(item["id"])
+        if not r.startswith(("image", "video")):
+            continue
         value = _ratio_of(r)
         if value is None:
             continue
