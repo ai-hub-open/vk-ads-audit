@@ -45,9 +45,12 @@ h1{font-size:22px;margin:0 0 4px}h2{font-size:17px;margin:28px 0 8px;border-bott
 .tile b{display:block;font-size:18px}.f{border:1px solid #e3e3e3;border-radius:8px;padding:10px 14px;margin:8px 0}
 .f h3{font-size:15px;margin:0 0 4px}.f.explained{background:#f6f6f6;color:#555}.note{font-style:italic}table{border-collapse:collapse;width:100%;font-size:13px}
 td,th{border-bottom:1px solid #eee;padding:4px 6px;text-align:left}th{background:#fafafa}
-.score{font-weight:600}.st-pass{color:#1a7f37}.st-fail{color:#c62828}.st-unk{color:#888}.st-pot{color:#1a7f37}
+.alert{border:2px solid #c62828;background:#fdecea;color:#7f1d1d;border-radius:8px;padding:14px 18px;
+margin:16px 0;font-size:17px;font-weight:600}.score{font-weight:600}.st-pass{color:#1a7f37}.st-fail{color:#c62828}.st-unk{color:#888}.st-pot{color:#1a7f37}
 @media print{body{margin:0}.f{break-inside:avoid}}
 """
+ZERO_SPEND_HTML = ("<div class='alert'>Расход за период 0 ₽: группы есть, но за период не откручивали — выводов по "
+                   "расходу и результату нет, проверены только настройки кабинета.</div>")
 STATUS_ICON = {"pass": "✅", "fail": "❌", "unknown": "—", "na": "—", "ask": "❓", "potential": "🟢"}
 STATUS_CLASS = {"pass": "pass", "fail": "fail", "unknown": "unk", "na": "unk", "ask": "unk", "potential": "pot"}
 
@@ -195,6 +198,7 @@ def render(ds: dict, findings: dict, collect_log=None, title: str = "", th=None)
              f"<h1>Аудит VK Рекламы {escape(title)}</h1>",
              f"<p class='muted'>Период {ds['period']['from']} — {ds['period']['to']} · путь {ds['coverage']['path']}"
              f" · опорный CPA: {fmt_rub(ref)} ({ref_note})</p>",
+             ZERO_SPEND_HTML if ds.get("zero_spend") else "",
              "<div class='tiles'>" + "".join(f"<div class='tile'>{k}<b>{v}</b></div>" for k, v in tiles) + "</div>",
              _metrika_total_html(ds.get("metrika_total")),
              _checklist_html(findings.get("checklist")),

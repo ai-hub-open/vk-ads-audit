@@ -463,3 +463,62 @@ def test_naming_counts_only_live_groups_and_their_plans():
     only_dead = make_ds(dead, plans=plans)
     assert found(only_dead, "naming") == []
     assert (row(checklist(only_dead), "B7")["status"], row(checklist(only_dead), "B7")["reason"]) == ("na", NO_ACTIVE)
+
+
+# ---- 3. нулевой расход: нет живых групп — стоп, есть живые — отчёт с плашкой ----
+
+def _norm(ws, *extra):
+    from scripts.normalize import main as norm_main
+    return norm_main(["--workspace", str(ws), "--date-from", D[0], "--date-to", D[1], "--path", "A", *extra])
+
+
+def test_zero_spend_and_no_live_groups_stops_without_dataset(tmp_path, capsys):
+    from scripts.normalize import spend_state
+    ws = tmp_path / "ws"
+    cabinet(ws / "raw", [{"id": i, "name": f"G{i}", "status": "deleted"} for i in range(1, 4)])
+    assert spend_state(build_dataset(ws / "raw", *D)) == "idle"
+    assert _norm(ws) == 5
+    out = capsys.readouterr().out
+    assert "нет живых групп" in out and "строить не на чем" in out
+    assert not (ws / "dataset.json").exists()
+
+
+def test_zero_spend_with_archived_only_also_stops(tmp_path):
+    ws = tmp_path / "ws"
+    cabinet(ws / "raw", [_active(1, issues=[{"code": "ARCHIVED"}])], daily={1: []})
+    assert _norm(ws) == 5
+
+
+def test_spend_on_archived_groups_builds_report_without_score(tmp_path):
+    ws = tmp_path / "ws"
+    cabinet(ws / "raw", [_active(1, issues=[{"code": "ARCHIVED"}])], daily={1: day_rows(2)})
+    assert _norm(ws) == 0 and (ws / "dataset.json").exists()
+
+
+def test_zero_spend_with_live_groups_builds_report_with_banner(tmp_path):
+    import json
+    from scripts.render_report import render
+    ws = tmp_path / "ws"
+    cabinet(ws / "raw", [_active(1)], daily={1: day_rows(3, spent="0", shows=0, clicks=0, goals=0)})
+    assert _norm(ws) == 0
+    ds = json.loads((ws / "dataset.json").read_text(encoding="utf-8"))
+    assert ds["zero_spend"] is True
+    html = render(ds, {**res(ds), "checklist": checklist(ds)})
+    assert "Расход за период 0 ₽" in html and html.index("Расход за период 0 ₽") < html.index("Чек-лист")
+
+
+def test_zero_spend_flag_only_when_spend_is_known(tmp_path):
+    raw = tmp_path / "raw"
+    cabinet(raw, [_active(1), _active(2)])                               # статистику не собирали — не «0 ₽»
+    assert build_dataset(raw, *D)["zero_spend"] is False
+    raw2 = tmp_path / "raw2"
+    cabinet(raw2, [_active(1), _active(2)])
+    _stat_call(raw2, "vk_ads_statistics_day", "campaigns", [1], [])          # группа 2 без статистики — неизвестно
+    assert build_dataset(raw2, *D)["zero_spend"] is False
+    raw3 = tmp_path / "raw3"
+    cabinet(raw3, [_active(1)], daily={1: day_rows(2)})
+    assert build_dataset(raw3, *D)["zero_spend"] is False
+
+
+def test_skill_explains_zero_spend_stop():
+    assert "нет живых групп" in SKILL and "кодом 5" in SKILL and "Расход за период 0 ₽" in SKILL

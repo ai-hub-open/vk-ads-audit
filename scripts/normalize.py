@@ -9,6 +9,8 @@ normalize.py — raw/ → dataset.json. Единицы приводятся ТО
 - metrics=base у дней: блока uniques нет — охват и частота «не определены» (None), а не 0;
 - конверсии: base.goals, для целей из CONVERSION_SOURCE — base.vk.result.
 Проверка здравого смысла (check_sanity) останавливает аудит на кривых числах.
+Нулевой расход (spend_state): нет живых групп и расхода нет — код 5, dataset.json не пишется (аудит строить не на чем);
+живые группы есть, расход известен и равен 0 — dataset.json с zero_spend: отчёт выйдет с плашкой «расход 0 ₽».
 
     python -m scripts.normalize --workspace <абс. путь> --date-from D --date-to D [--target-cpa N] [--path A|B]
 """
@@ -475,6 +477,9 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
         "as_of": as_of or datetime.now().isoformat(timespec="minutes"),
         "totals_windows": windows_of([r for g in counted for r in g["daily"]], d_from, d_to),
         "notes": notes,
+        # расход известен (статистика есть по всем живым группам) и равен 0 — отчёт с плашкой «расход за период 0 ₽»
+        "zero_spend": bool(live_groups and has_stats and not absent
+                           and aggregate([g["stats"] for g in counted])["spent"] == 0),
         "coverage": {"path": path, "banners": bool(banner_calls),
                      "banner_groups": sorted(banner_groups, key=lambda x: (str(type(x)), x)),
                      "summary": bool(summary_calls), "stats": has_stats,
@@ -482,6 +487,14 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
                      "pixels": bool(read_calls(raw_dir, "vk_ads_remarketing_pixels_list")),
                      "metrika": False},
     }
+
+
+def spend_state(ds: dict) -> str:
+    """idle — нет живых групп (все удалены или в архиве) и расхода нет: аудит строить не на чем;
+    zero_spend — живые группы есть, расход за период известен и равен 0; ok — остальное."""
+    if not any(_is_live(g) for g in ds["groups"]) and ds["totals"]["spent"] == 0:
+        return "idle"
+    return "zero_spend" if ds.get("zero_spend") else "ok"
 
 
 def _check_stats(entity: str, s, out: list):
@@ -614,6 +627,11 @@ def main(argv=None) -> int:
                 print(f"✗ metrika.json: {e}")
             return 3
         merge_metrika(ds, metrika)
+    if spend_state(ds) == "idle":
+        print(f"✗ В кабинете нет живых групп (все удалены или в архиве) и расхода по ним за {args.date_from} — "
+              f"{args.date_to} нет: аудит строить не на чем. Выберите другой кабинет или вернитесь, когда группы "
+              "заработают.")
+        return 5
     issues = check_sanity(ds)
     if issues:
         (ws / "sanity.json").write_text(json.dumps(issues, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -623,6 +641,9 @@ def main(argv=None) -> int:
         return 3
     (ws / "dataset.json").write_text(json.dumps(ds, ensure_ascii=False, indent=1), encoding="utf-8")
     print(f"групп: {len(ds['groups'])}, объявлений: {len(ds['banners'])}, расход: {ds['totals']['spent']} ₽")
+    if ds["zero_spend"]:
+        print("⚠ Расход за период 0 ₽: группы есть, но не откручивали — отчёт выйдет с плашкой, выводов по "
+              "эффективности не будет.")
     return 0
 
 
