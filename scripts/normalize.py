@@ -550,9 +550,11 @@ def zero_spend_head(ds: dict, short: bool = False) -> str:
             "Расход кабинета за период 0 ₽: группы есть, но не откручивали"
     rest = [g for g in ds["groups"] if g["status"] != "deleted"]
     archived = round(sum(g["stats"]["spent"] for g in rest), 2)   # живые — 0
-    diff = round(max(acc - archived, 0.0), 2)
+    diff = round(acc - archived, 2)
+    diff = diff if diff >= 1 else 0.0   # копейки округлений — не «пришлось на удалённые»
     has_deleted = any(g["status"] == "deleted" for g in ds["groups"])
-    if diff and (not has_deleted or any(g.get("stats_missing") for g in rest)):
+    mismatch = acc - archived <= -1   # кабинет меньше архивных групп: данные расходятся, раскладке не верим
+    if mismatch or (diff and (not has_deleted or any(g.get("stats_missing") for g in rest))):
         return f"Расход кабинета за период {_fmt_rub(acc)}, у живых групп 0 ₽ — разложить разницу по группам не удалось"
     parts = ([f"{_fmt_rub(diff)} пришлось на удалённые группы"] if diff else []) + \
         ([f"{_fmt_rub(archived)} — на архивные группы"] if archived else [])

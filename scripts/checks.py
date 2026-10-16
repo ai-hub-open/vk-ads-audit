@@ -276,6 +276,8 @@ def run_checks(ds: dict, th: dict, findings: list, evaluated: dict | None = None
         f5_reason = no_active[1]
     elif no_stats[0]:   # статистики нет — про показы ничего не известно
         f5_status, f5_reason = no_stats
+    elif any(g.get("stats_missing") for g in live):   # «нет показов» по неполученной статистике было бы выдумкой
+        f5_status, f5_reason = "unknown", "статистика получена не по всем группам"
     elif ds.get("zero_spend") or not any(g["stats"]["shows"] for g in live):
         f5_reason = "у активных групп нет показов за период"   # «моложе 7 дней» по нулям было бы неправдой
     else:

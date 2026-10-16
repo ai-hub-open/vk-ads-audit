@@ -820,3 +820,29 @@ def test_no_spend_in_log_is_idle_not_no_stats(tmp_path):
     (ws / "collect_log.json").write_text(json.dumps({"calls": [], "no_spend": True, "preflight_spent": 0.0}),
                                          encoding="utf-8")
     assert _norm(ws) == 5
+
+
+# ======== финальное ревью fix/live-run-2 ========
+
+def test_f5_unknown_when_active_groups_stats_missing():          # М1
+    ds = make_ds([make_group(1, stats_missing=True), make_group(2, stats_missing=True)])
+    c = row(checklist(ds), "F5")
+    assert (c["status"], c["reason"]) == ("unknown", "статистика получена не по всем группам")
+
+
+def test_zero_spend_head_skips_sub_ruble_and_inconsistent_split():   # М2
+    from scripts.normalize import zero_spend_head
+    deleted = make_group(3, status="deleted")
+    arch = make_group(2, issues=["ARCHIVED"], stats=stats(300, 1000, 10, 0))
+    tiny = make_ds([_zero_group(1), arch, deleted], zero_spend=True, account_spent=300.4)
+    assert zero_spend_head(tiny) == "Живые группы за период не откручивали; 300 ₽ — на архивные группы"
+    odd = make_ds([_zero_group(1), arch, deleted], zero_spend=True, account_spent=200.0)   # кабинет < архивных
+    assert zero_spend_head(odd) == ("Расход кабинета за период 200 ₽, у живых групп 0 ₽ — "
+                                    "разложить разницу по группам не удалось")
+
+
+def test_f5_doc_has_no_always_na_contradiction():               # М3
+    rules = _ref("diagnostic-rules.md")
+    f5 = next(ln for ln in rules.splitlines() if ln.startswith("| `F5`"))
+    assert "всегда `na`" not in f5 and "`unknown`" in f5
+    assert "всегда `na`" not in rules
