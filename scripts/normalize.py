@@ -1,9 +1,11 @@
 """
 normalize.py — raw/ → dataset.json. Единицы приводятся ТОЛЬКО здесь.
 
-- бюджеты групп приходят в копейках (6000000 = 60 000 ₽);
+- бюджеты групп и кампаний приходят в рублях (подтверждено живым прогоном: 50000 = «50 000 ₽» в кабинете);
 - деньги статистики — строками в рублях;
-- CTR считаем сами из clicks/shows, значение VK (доля) храним для проверки единиц;
+- CTR считаем сами из clicks/shows, значение VK (оно уже в процентах) храним для проверки единиц;
+- итоги периода — сумма строк statistics_day: statistics_summary игнорирует период и отдаёт всё время
+  (баг MCP), поэтому охват и частота берутся из сводки только для групп, чья жизнь целиком в периоде;
 - конверсии: base.goals, для целей из CONVERSION_SOURCE — base.vk.result.
 Проверка здравого смысла (check_sanity) останавливает аудит на кривых числах.
 
@@ -24,19 +26,18 @@ try:
     from scripts._workspace import resolve_workspace
     from scripts.features import (AUTO_UTM_KEYS, ERID_KEYS, EXCLUDE_KEYS, PLAN_BUDGET_KEYS, SIZE_KEYS, UPDATED_KEYS,
                                   SEGMENT_RELATION_KEYS, banner_text, content_features, first_known, is_lal,
-                                  layer_of, observed_keys, parse_dt, targeting_features, url_strings,
-                                  users_list_ids)
+                                  is_live_group, layer_of, observed_keys, parse_dt, targeting_features,
+                                  url_strings, users_list_ids)
     from scripts.raw_store import items_of, read_calls
 except ImportError:  # запуск напрямую
     from _console import setup_console
     from _workspace import resolve_workspace
     from features import (AUTO_UTM_KEYS, ERID_KEYS, EXCLUDE_KEYS, PLAN_BUDGET_KEYS, SIZE_KEYS, UPDATED_KEYS,
                           SEGMENT_RELATION_KEYS, banner_text, content_features, first_known, is_lal,
-                          layer_of, observed_keys, parse_dt, targeting_features, url_strings,
-                          users_list_ids)
+                          is_live_group, layer_of, observed_keys, parse_dt, targeting_features,
+                          url_strings, users_list_ids)
     from raw_store import items_of, read_calls
 
-KOPECKS = 100
 CONVERSION_SOURCE = {"leadads": "vk.result", "socialengagement": "vk.result"}
 NOT_TARGETING = ("fulltime",)
 
@@ -59,8 +60,9 @@ def money(v) -> float:
     return f
 
 
-def kopecks_to_rub(v):
-    return None if v in (None, "") else round(money(v) / KOPECKS, 2)
+def _rub(v):
+    """Бюджет в рублях как есть; None — поля нет (лимита нет или не получен)."""
+    return None if v in (None, "") else round(money(v), 2)
 
 
 def _ratios(spent: float, shows: int, clicks: int, conv: int) -> dict:
@@ -83,7 +85,7 @@ def stats_from(block, objective) -> dict:
         conv = int(b.get("goals") or 0)
     return {"spent": spent, "shows": shows, "clicks": clicks, "conversions": conv,
             **_ratios(spent, shows, clicks, conv),
-            "vk_ctr_pct": None if b.get("ctr") in (None, "") else round(float(b["ctr"]) * 100, 4),
+            "vk_ctr_pct": None if b.get("ctr") in (None, "") else round(float(b["ctr"]), 4),   # у VK уже проценты
             "reach": int(u.get("reach") or 0), "frequency": float(u.get("frequency") or 0) or None}
 
 
@@ -239,6 +241,11 @@ def _blind_ids(raw_dir: Path, tool: str, keys) -> set:
 
 
 def _auto_utm(g, observed):
+    """Группа размечена: enable_utm true или в utm непустой шаблон (живой прогон: ключ enable_utm у части групп
+    опущен — отсутствие = выключено, если ключ встречался у других)."""
+    utm = g.get("utm")
+    if isinstance(utm, str) and utm.strip():
+        return True
     if not any(k in observed for k in AUTO_UTM_KEYS):
         return None
     return bool(first_known(g, AUTO_UTM_KEYS, observed))
@@ -260,8 +267,26 @@ def windows_of(daily: list, d_from: date, d_to: date) -> dict:
     return out
 
 
+_is_live = is_live_group   # единый помощник (features.py): для гигиены и проверок архивной группы не существует
+
+
+def _lifetime_fits(g: dict, d_from: date, period_stats: dict, summary_stats: dict) -> bool:
+    """Охват и частота из statistics_summary (она отдаёт всё время) годны за период, только если вся жизнь
+    группы в периоде: создана не раньше начала и число показов в сводке совпадает с суммой дней."""
+    created = parse_dt(g.get("created"))
+    if not created or created.date() < d_from:
+        return False
+    shows, total = period_stats["shows"], summary_stats["shows"]
+    return abs(total - shows) <= max(10, 0.01 * shows)
+
+
+def _no_access_to_lists(collect_log) -> bool:
+    return any(c.get("tool") == "vk_ads_users_lists_list" and not c.get("ok", True) and c.get("no_access")
+               for c in (collect_log or {}).get("calls", []))
+
+
 def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, path: str = "B",
-                  as_of=None) -> dict:
+                  as_of=None, collect_log=None) -> dict:
     raw_dir = Path(raw_dir)
     d_from, d_to = date.fromisoformat(date_from), date.fromisoformat(date_to)
     if d_to < d_from:
@@ -269,7 +294,8 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
     period = (date_from, date_to)
     summary, summary_ids, summary_calls = _entity_stats(raw_dir, "vk_ads_statistics_summary", "campaigns", period)
     bsummary, _, _ = _entity_stats(raw_dir, "vk_ads_statistics_summary", "banners", period)
-    daily_raw, _, daily_calls = _entity_stats(raw_dir, "vk_ads_statistics_day", "campaigns", period)
+    daily_raw, daily_ids, daily_calls = _entity_stats(raw_dir, "vk_ads_statistics_day", "campaigns", period)
+    bdaily, bdaily_ids, bdaily_calls = _entity_stats(raw_dir, "vk_ads_statistics_day", "banners", period)
     has_stats = bool(summary_calls or daily_calls)
     notes: list = []
 
@@ -301,6 +327,7 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
     utm_blind = _blind_ids(raw_dir, "vk_ads_campaigns_list", AUTO_UTM_KEYS)
 
     objective_of: dict = {}
+    unmeasured_freq: list = []
     groups = []
     for g in raw_groups:
         obj = g.get("objective")
@@ -308,10 +335,15 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
         daily = [{"date": r.get("date"), **stats_from(r, obj)}
                  for r in (daily_raw.get(g["id"]) or {}).get("rows") or []]
         missing = False
-        if g["id"] in summary_ids:  # нет в items при покрытии вызовом — показов не было, это нули
-            stats = stats_from((summary.get(g["id"]) or {}).get("total"), obj)
-        elif daily:
+        if g["id"] in daily_ids:  # нет в items при покрытии вызовом — показов не было, это нули
             stats = aggregate(daily)
+            sm = stats_from((summary.get(g["id"]) or {}).get("total"), obj) if g["id"] in summary else None
+            if sm and daily and _lifetime_fits(g, d_from, stats, sm):
+                stats = {**stats, "reach": sm["reach"], "frequency": sm["frequency"]}
+            else:
+                unmeasured_freq.append(g["id"])
+        elif daily_calls == 0 and g["id"] in summary_ids:  # только старый raw/ без дней: сводка (всё время) — не подмена
+            stats = stats_from((summary.get(g["id"]) or {}).get("total"), obj)
         else:
             stats = stats_from(None, obj)
             missing = has_stats
@@ -319,8 +351,8 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
             "id": g["id"], "name": g.get("name") or "", "status": g.get("status"), "objective": obj,
             "package_id": g.get("package_id"), "ad_plan_id": g.get("ad_plan_id"),
             "delivery": g.get("delivery"), "autobidding_mode": g.get("autobidding_mode"),
-            "budget_day_rub": kopecks_to_rub(g.get("budget_limit_day")),
-            "budget_total_rub": kopecks_to_rub(g.get("budget_limit")),
+            "budget_day_rub": _rub(g.get("budget_limit_day")),
+            "budget_total_rub": _rub(g.get("budget_limit")),
             "issues": _codes(g.get("issues")), "created": g.get("created"), "date_end": g.get("date_end"),
             "targeting_key": targeting_key(g.get("targetings")),
             "segment_ids": _segment_ids(g.get("targetings")),
@@ -329,7 +361,8 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
             "features": targeting_features(g.get("targetings"), observed_t),
             "layer": layer_of(_segment_ids(g.get("targetings")), segments_by_id) if "targetings" in g else None,
             "max_price_rub": _price(g.get("max_price")),
-            "auto_utm": None if g["id"] in utm_blind else _auto_utm(g, observed_g),
+            "auto_utm": _auto_utm(g, observed_g) if (g["id"] not in utm_blind or isinstance(g.get("utm"), str))
+            else None,
             "windows": windows_of(daily, d_from, d_to),
             "banner_ids": [b["id"] for b in banners if b["_group"] == g["id"]],
         }
@@ -339,7 +372,13 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
 
     banner_out = []
     for b in banners:
-        st = bsummary.get(b["id"])
+        if b["id"] in bdaily:
+            obj = objective_of.get(b["_group"])
+            bstats = aggregate([stats_from(r, obj) for r in bdaily[b["id"]].get("rows") or []])
+        elif bdaily_calls == 0 and b["id"] in bsummary:  # только старый raw/ без дней
+            bstats = stats_from(bsummary[b["id"]].get("total"), objective_of.get(b["_group"]))
+        else:
+            bstats = None
         banner_out.append({
             "id": b["id"], "name": b.get("name") or "", "group_id": b["_group"], "status": b.get("status"),
             "moderation_status": b.get("moderation_status"), "moderation_reasons": b.get("moderation_reasons"),
@@ -353,10 +392,11 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
             "age_days": (d_to - parse_dt(b["created"]).date()).days if parse_dt(b.get("created")) else None,
             "erid": (None if b["id"] in erid_blind or not any(k in observed_b for k in ERID_KEYS)
                      else str(first_known(b, ERID_KEYS, observed_b) or "")),
-            "stats": stats_from(st.get("total"), objective_of.get(b["_group"])) if st else None,
+            "stats": bstats,
         })
 
-    live_groups = [g for g in groups if g["status"] != "deleted"]
+    live_groups = [g for g in groups if _is_live(g)]
+    counted = [g for g in groups if g["status"] != "deleted"]   # расход архивных групп в итогах остаётся
     if banner_calls:
         uncovered = [g for g in live_groups if g["status"] == "active" and g["id"] not in banner_groups]
         if uncovered:
@@ -367,11 +407,16 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
     by_id = {b["id"]: b for b in banner_out}
     for g in live_groups:
         bs = [by_id[i]["stats"] for i in g["banner_ids"] if by_id[i]["stats"]]
-        if summary_calls and bs and len(bs) == len(g["banner_ids"]) and not g.get("stats_missing"):
+        if has_stats and bs and len(bs) == len(g["banner_ids"]) and not g.get("stats_missing"):
             total, spent = sum(s["spent"] for s in bs), g["stats"]["spent"]
             if spent - total > max(1.0, 0.01 * spent):
                 notes.append(f"Сумма по объявлениям меньше расхода группы {g['id']} "
                              "(часть объявлений удалена?)")
+
+    no_freq = [g for g in live_groups if g["id"] in unmeasured_freq and g["stats"]["shows"] > 0]
+    if no_freq:
+        notes.append(f"Частота и охват за период не определены для {len(no_freq)} групп: статистика VK отдаёт их "
+                     "только за всё время жизни группы — правила по частоте (выгорание) по ним не применялись.")
 
     def named(tool):
         return [{"id": x.get("id"), "name": x.get("name") or ""} for x in _list_items(raw_dir, tool)]
@@ -381,7 +426,7 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
     plan_budget_known = any(k in observed_p for k in PLAN_BUDGET_KEYS)
 
     def plan_out(p):
-        day, total = kopecks_to_rub(p.get("budget_limit_day")), kopecks_to_rub(p.get("budget_limit"))
+        day, total = _rub(p.get("budget_limit_day")), _rub(p.get("budget_limit"))
         return {"id": p.get("id"), "name": p.get("name") or "", "status": p.get("status"),
                 "budget_day_rub": day, "budget_total_rub": total,
                 "has_budget": bool(day or total) if plan_budget_known else None}
@@ -395,6 +440,14 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
         return v if isinstance(v, int) and not isinstance(v, bool) else None
 
     relations_known = any(k in observed_s for k in SEGMENT_RELATION_KEYS)
+    if seg_items and not relations_known and not any(k in observed_s for k in SIZE_KEYS):
+        notes.append("MCP не возвращает размер сегментов и связи с базами клиентов — размер LAL-сегментов и "
+                     "обновление баз клиентов не проверялись.")
+    lists_collected = bool(read_calls(raw_dir, "vk_ads_users_lists_list"))
+    lists_no_access = _no_access_to_lists(collect_log)
+    if lists_no_access:
+        notes.append("Нет доступа к базам клиентов (vk_ads_users_lists_list): проверки, зависящие от баз, "
+                     "не выполнялись — не хватает прав у подключения.")
     return {
         "period": {"from": date_from, "to": date_to, "days": (d_to - d_from).days + 1},
         "target_cpa": target_cpa,
@@ -407,13 +460,14 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
         "users_lists": [{"id": u.get("id"), "name": u.get("name") or "", "size": size_of(u, observed_u),
                          "updated": first_known(u, UPDATED_KEYS, observed_u)} for u in users_items],
         "pixels": named("vk_ads_remarketing_pixels_list"),
-        "totals": aggregate([g["stats"] for g in live_groups]),
+        "totals": aggregate([g["stats"] for g in counted]),
         "as_of": as_of or datetime.now().isoformat(timespec="minutes"),
-        "totals_windows": windows_of([r for g in live_groups for r in g["daily"]], d_from, d_to),
+        "totals_windows": windows_of([r for g in counted for r in g["daily"]], d_from, d_to),
         "notes": notes,
         "coverage": {"path": path, "banners": bool(banner_calls),
                      "banner_groups": sorted(banner_groups, key=lambda x: (str(type(x)), x)),
                      "summary": bool(summary_calls), "stats": has_stats,
+                     "users_lists": lists_collected, "users_lists_no_access": lists_no_access,
                      "pixels": bool(read_calls(raw_dir, "vk_ads_remarketing_pixels_list")),
                      "metrika": False},
     }
@@ -440,17 +494,12 @@ def check_sanity(ds: dict) -> list:
         for d in g["daily"]:
             _check_stats(f"group:{g['id']}@{d['date']}", d, out)
         bs = [banners[i]["stats"] for i in g["banner_ids"] if banners[i]["stats"]]
-        if ds["coverage"]["summary"] and bs and len(bs) == len(g["banner_ids"]):
+        if ds["coverage"].get("stats", True) and bs and len(bs) == len(g["banner_ids"]):
             total = sum(s["spent"] for s in bs)
             # Меньше группы — норма (часть объявлений удалена, см. notes); больше — единицы или данные кривые.
             if total - g["stats"]["spent"] > max(1.0, 0.01 * g["stats"]["spent"]):
                 out.append({"code": "banners_vs_group", "entity": f"group:{g['id']}",
                             "detail": f"объявления {total} ₽, группа {g['stats']['spent']} ₽"})
-        if ds["coverage"]["summary"] and g["daily"] and not g.get("stats_missing"):
-            daily_total = round(sum(d["spent"] for d in g["daily"]), 2)
-            if abs(daily_total - g["stats"]["spent"]) > max(1.0, 0.01 * g["stats"]["spent"]):
-                out.append({"code": "summary_vs_daily", "entity": f"group:{g['id']}",
-                            "detail": f"сводка {g['stats']['spent']} ₽, по дням {daily_total} ₽"})
     for b in ds["banners"]:
         _check_stats(f"banner:{b['id']}", b["stats"], out)
     return out
@@ -515,6 +564,14 @@ def merge_metrika(ds: dict, metrika: dict) -> dict:
     return ds
 
 
+def _read_collect_log(ws: Path):
+    try:
+        data = json.loads((ws / "collect_log.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def main(argv=None) -> int:
     setup_console()
     parser = argparse.ArgumentParser(description="raw/ → dataset.json")
@@ -528,7 +585,8 @@ def main(argv=None) -> int:
     for name in ("dataset.json", "sanity.json"):  # старый результат не должен пережить этот прогон
         (ws / name).unlink(missing_ok=True)
     try:
-        ds = build_dataset(ws / "raw", args.date_from, args.date_to, args.target_cpa, args.path)
+        ds = build_dataset(ws / "raw", args.date_from, args.date_to, args.target_cpa, args.path,
+                           collect_log=_read_collect_log(ws))
     except (ValueError, KeyError, TypeError, AttributeError) as e:
         print(f"✗ raw/ не разобран: {type(e).__name__}: {e}")
         return 3

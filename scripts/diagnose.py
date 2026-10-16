@@ -21,11 +21,11 @@ from pathlib import Path
 try:
     from scripts._console import setup_console
     from scripts._workspace import SKILL_ROOT, resolve_workspace
-    from scripts.features import parse_dt
+    from scripts.features import is_live_group, parse_dt
 except ImportError:  # запуск напрямую
     from _console import setup_console
     from _workspace import SKILL_ROOT, resolve_workspace
-    from features import parse_dt
+    from features import is_live_group, parse_dt
 
 LEVEL_ORDER = {"red": 0, "orange": 1, "green": 2, "white": 3}
 DEFAULT_THRESHOLDS = SKILL_ROOT / "references" / "thresholds.json"
@@ -80,7 +80,13 @@ def _active(g, th) -> bool:
 
 
 def _live(ds):
-    return [g for g in ds["groups"] if g["status"] != "deleted"]
+    return [g for g in ds["groups"] if is_live_group(g)]
+
+
+def _banners(ds) -> list:
+    """Объявления живых групп: объявления удалённых и архивных групп правилам и чек-листу не видны."""
+    dead = {g["id"] for g in ds["groups"] if not is_live_group(g)}
+    return [b for b in ds["banners"] if b["group_id"] not in dead]
 
 
 def _measured(ds):
@@ -189,7 +195,7 @@ def no_active_banners(ds, th, ctx):
 @rule
 def rejected_banners(ds, th, ctx):
     out = []
-    for b in ds["banners"]:
+    for b in _banners(ds):
         if b["status"] == "deleted":
             continue
         _seen(ctx, "rejected_banners")
@@ -338,7 +344,7 @@ def _site_url(u: str, th) -> bool:
 @rule
 def ord_missing(ds, th, ctx):
     # проверяем только объявления, у которых поле получено: erid None — «не проверено»
-    active = [b for b in ds["banners"] if b["status"] in th["active_statuses"] and b.get("erid") is not None]
+    active = [b for b in _banners(ds) if b["status"] in th["active_statuses"] and b.get("erid") is not None]
     if not active:
         return []
     _seen(ctx, "ord_missing", len(active))
@@ -354,7 +360,7 @@ def ord_missing(ds, th, ctx):
 @rule
 def utm_missing(ds, th, ctx):
     known = {g["id"]: g["auto_utm"] for g in ds["groups"] if g.get("auto_utm") is not None}  # None — молчим
-    site = [b for b in ds["banners"] if b["status"] in th["active_statuses"] and b["group_id"] in known
+    site = [b for b in _banners(ds) if b["status"] in th["active_statuses"] and b["group_id"] in known
             and any(_site_url(u, th) for u in b.get("urls") or [])]
     _seen(ctx, "utm_missing", len(site))  # группы с авто-UTM проверены: метки им ставит VK
     bad = [b for b in site if known[b["group_id"]] is False and not any("utm_" in u for u in b.get("urls") or [])]
@@ -467,7 +473,7 @@ def naming(ds, th, ctx):
     pats = [re.compile(p, re.I) for p in th["default_name_patterns"]]
     names = ([p["name"] for p in ds["plans"] if p.get("status") != "deleted"]
              + [g["name"] for g in _live(ds)]
-             + [b["name"] for b in ds["banners"] if b["status"] != "deleted"])
+             + [b["name"] for b in _banners(ds) if b["status"] != "deleted"])
     names = [n.strip() for n in names if n and n.strip()]  # пустые названия не считаем ни плохими, ни в общем числе
     if not names:
         return []
@@ -563,7 +569,7 @@ def too_broad(ds, th, ctx):
 def creative_overlap(ds, th, ctx):
     groups = {g["id"]: g for g in _live(ds) if _active(g, th) and _layer(g) is not None}  # без таргетингов — молчим
     by_content = defaultdict(set)
-    for b in ds["banners"]:
+    for b in _banners(ds):
         if b["status"] in th["active_statuses"] and b["group_id"] in groups:
             for cid in b.get("content_ids") or []:
                 by_content[cid].add(b["group_id"])
@@ -667,8 +673,9 @@ def _content_groups(ds, th):
 def missing_ratios(ds, th, ctx):
     out = []
     for g, active in _content_groups(ds, th):
-        if any(not b.get("content_ids") or not (b.get("ratios") or b.get("has_video")) for b in active):
-            continue   # не все объявления с контентом и классифицированы — «не проверено», молчим
+        if any(not b.get("content_ids") or not (b.get("ratios") or b.get("has_video")) or b.get("ratios_unknown")
+               for b in active):
+            continue   # не все объявления с контентом и классифицированы (или соотношение не читается) — молчим
         _seen(ctx, "missing_ratios")
         have = set().union(*(set(b.get("ratios") or []) for b in active))
         missing = [r for r in th["required_ratios"] if r not in have]
@@ -764,7 +771,7 @@ def moderation_stuck(ds, th, ctx):
     if not as_of:
         return []
     out = []
-    for b in ds["banners"]:
+    for b in _banners(ds):
         stamps = [s for s in (parse_dt(b.get("created")), parse_dt(b.get("updated"))) if s]
         if b["status"] == "deleted" or b["moderation_status"] not in th["moderating_statuses"] or not stamps:
             continue
@@ -1057,7 +1064,7 @@ def funnel_status(ds: dict, th: dict) -> dict:
     live = [g for g in _live(ds) if _active(g, th)]
     if not live:
         return {k: ("na", "нет активных групп") for k, _ in FUNNEL_LABELS}
-    banners = [b for b in ds["banners"] if b["status"] in th["active_statuses"]]
+    banners = [b for b in _banners(ds) if b["status"] in th["active_statuses"]]
     objectives = {g["objective"] for g in live}
     urls = [u.lower() for b in banners for u in b.get("urls") or []]
     layers_known = any(_layer(g) is not None for g in live)

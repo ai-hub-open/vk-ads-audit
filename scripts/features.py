@@ -21,8 +21,8 @@ EXCLUDE_KEYS = ("segments_exclude", "exclude_segments", "excluded_segments")    
 AUTO_PADS_KEYS = ("auto_placements", "pads_auto")                                    # API?
 DEVICE_ADJ_KEYS = ("device_bid_adjustments", "mobile_bid_adjustments")               # API?
 DEMO_ADJ_KEYS = ("demography_bid_adjustments", "sex_age_bid_adjustments")            # API?
-ERID_KEYS = ("erid", "ord_token", "ord_erid")                                        # API? (объявление)
-AUTO_UTM_KEYS = ("enable_utm", "auto_utm")                                           # API? (группа)
+ERID_KEYS = ("ord_marker",)                                                          # подтверждено 16.10.2026 (объявление)
+AUTO_UTM_KEYS = ("enable_utm",)                                                     # подтверждено 16.10.2026 (группа)
 PLAN_BUDGET_KEYS = ("budget_limit", "budget_limit_day")                              # API? (кампания)
 SIZE_KEYS = ("size", "count", "entries_count", "audience_size")                      # API? (сегмент, база)
 UPDATED_KEYS = ("updated", "last_upload", "uploaded")                                # API? (база)
@@ -33,6 +33,13 @@ USERS_LIST_TYPE_MARKERS = ("users_list", "user_list")                           
 RATIOS = {"1:1": 1.0, "4:5": 0.8, "16:9": 16 / 9, "9:16": 9 / 16}
 RATIO_TOL = 0.04
 _LAL_RE = re.compile(r"lookalike|look-alike|\blal\b|похож", re.I)
+
+
+def is_live_group(g) -> bool:
+    """Группа не удалена и не в архиве (VK отдаёт архивные с issues [{"code": "ARCHIVED"}] — в dataset это коды)."""
+    issues = g.get("issues") or []
+    codes = {i.get("code") if isinstance(i, dict) else i for i in issues}
+    return g.get("status") != "deleted" and "ARCHIVED" not in codes
 
 
 def observed_keys(dicts) -> set:
@@ -88,7 +95,9 @@ def _ratio_of(role: str):
 
 
 def content_features(content) -> dict:
-    ratios, video, ids = set(), False, []
+    """ratios_unknown — есть роль image/video, из имени которой соотношение сторон не прочитать
+    (например video_landscape_180s): форматы такого объявления неизвестны, а не «отсутствуют»."""
+    ratios, video, ids, unknown = set(), False, [], False
     for role, item in (content.items() if isinstance(content, dict) else []):
         r = str(role).lower()
         video = video or r.startswith("video")
@@ -98,11 +107,12 @@ def content_features(content) -> dict:
             continue
         value = _ratio_of(r)
         if value is None:
+            unknown = True
             continue
         for name, target in RATIOS.items():
             if abs(value - target) / target <= RATIO_TOL:
                 ratios.add(name)
-    return {"ratios": sorted(ratios), "has_video": video, "content_ids": ids}
+    return {"ratios": sorted(ratios), "has_video": video, "content_ids": ids, "ratios_unknown": unknown}
 
 
 def url_strings(v) -> list:

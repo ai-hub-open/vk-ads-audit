@@ -130,8 +130,8 @@ def test_erid_and_auto_utm_unknown_for_calls_without_the_field(tmp_path):
                {"items": [{"id": 1, "name": "G1", "status": "active", "enable_utm": False}]})
     write_call(raw, "vk_ads_campaigns_list", {"paginated": True, "fields": "id,name"},
                {"items": [{"id": 2, "name": "G2", "status": "active"}]})
-    write_call(raw, "vk_ads_banners_list", {"campaign_id": 1, "paginated": True, "fields": "id,erid,urls"},
-               {"items": [{"id": 11, "status": "active", "erid": "abc", "urls": {"u": {"url": "https://s.ru/"}}}]})
+    write_call(raw, "vk_ads_banners_list", {"campaign_id": 1, "paginated": True, "fields": "id,ord_marker,urls"},
+               {"items": [{"id": 11, "status": "active", "ord_marker": "abc", "urls": {"u": {"url": "https://s.ru/"}}}]})
     write_call(raw, "vk_ads_banners_list", {"campaign_id": 2, "paginated": True, "fields": "id,urls"},
                {"items": [{"id": 21, "status": "active", "urls": {"u": {"url": "https://s.ru/"}}}]})
     ds = build_dataset(raw, "2026-09-01", "2026-09-30")

@@ -45,7 +45,8 @@ def test_content_191_is_not_169():
 
 
 def test_content_missing():
-    assert content_features(None) == {"ratios": [], "has_video": False, "content_ids": []}
+    assert content_features(None) == {"ratios": [], "has_video": False, "content_ids": [],
+                                          "ratios_unknown": False}
 
 
 def test_urls_and_text():
@@ -74,6 +75,8 @@ def test_icons_do_not_count_as_ratios():
 
 def test_first_known_skips_null():
     from scripts.features import ERID_KEYS, first_known
-    d = {"erid": None, "ord_token": "Kra"}
-    assert first_known(d, ERID_KEYS, observed_keys([d])) == "Kra"
+    d = {"ord_marker": None, "enable_utm": True}
+    assert first_known(d, ERID_KEYS, observed_keys([d])) is None
+    d = {"ord_marker": "2VtzquiRr5b"}
+    assert first_known(d, ERID_KEYS, observed_keys([d])) == "2VtzquiRr5b"
     assert first_known(d, ERID_KEYS, set()) is None

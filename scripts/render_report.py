@@ -65,6 +65,10 @@ def _num(v) -> str:
     return escape(json.dumps(v, ensure_ascii=False) if isinstance(v, (list, dict)) else str(v))
 
 
+def _lists_no_access(c: dict) -> bool:
+    return c.get("tool") == "vk_ads_users_lists_list" and bool(c.get("no_access")) and not c.get("ok")
+
+
 def limitations(ds: dict, collect_log=None, checklist=None) -> list:
     lines = list(ALWAYS_LIMITATIONS)
     cov = ds["coverage"]
@@ -81,8 +85,11 @@ def limitations(ds: dict, collect_log=None, checklist=None) -> list:
                      "правила по группам не применялись.")
     calls = (collect_log or {}).get("calls", [])
     for c in calls:
-        if not c.get("ok") and not c.get("superseded"):
+        if not c.get("ok") and not c.get("superseded") and not c.get("preflight") and not _lists_no_access(c):
             lines.append(f"Не удалось получить {c['tool']}: {c.get('error')}")
+    if any(_lists_no_access(c) for c in calls) and not any(
+            "Нет доступа к базам клиентов" in n for n in ds.get("notes") or []):
+        lines.append("Нет доступа к базам клиентов: проверки, зависящие от баз, не выполнялись.")
     if any(c.get("superseded") for c in calls):
         lines.append("Расширенные поля не приняты сервером — часть проверок (маркировка, UTM, кнопки) не проверена")
     if not cov.get("stats", True):

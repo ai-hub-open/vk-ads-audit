@@ -15,10 +15,12 @@ from datetime import date, timedelta
 try:
     from scripts._console import setup_console
     from scripts._workspace import resolve_workspace
+    from scripts.features import is_live_group
     from scripts.normalize import aggregate
 except ImportError:  # запуск напрямую
     from _console import setup_console
     from _workspace import resolve_workspace
+    from features import is_live_group
     from normalize import aggregate
 
 SPIKE = 1.5
@@ -58,7 +60,7 @@ def _group_line(g: dict) -> str:
 def quick_summary(ds: dict, day: str, target_cpa=None) -> dict:
     d = date.fromisoformat(day)
     prev_days = {(d - timedelta(days=i)).isoformat() for i in range(1, 8)}
-    live = [g for g in ds["groups"] if g["status"] != "deleted"]
+    live = [g for g in ds["groups"] if is_live_group(g)]
     today_rows = [r for g in live for r in g["daily"] if r["date"] == day]
     prev_all = [r for g in live for r in g["daily"] if r["date"] in prev_days]
     has_today = bool(today_rows)
