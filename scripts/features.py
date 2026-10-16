@@ -69,6 +69,42 @@ def is_active_group(g, active_statuses) -> bool:
     return g.get("status") in active_statuses and not paused_by_plan(g)
 
 
+# Коды issues VK (группы, объявления, статус ОРД) → подписи в отчёте. Неизвестный код — «другая причина (КОД)»:
+# сырой код в скобках, чтобы специалист нашёл его в кабинете или документации VK (решение третьего живого прогона).
+ISSUE_LABELS = {
+    "OUT_OF_DAY_LIMIT": "превышен дневной лимит",
+    "OUT_OF_TOTAL_LIMIT": "исчерпан общий лимит",
+    "AD_PLAN_STOPPED": "кампания остановлена",
+    "ARCHIVED": "в архиве",
+    "NO_BANNERS": "нет объявлений",
+    "NO_BANNERS_WITH_ACTIVE_STATUS": "нет активных объявлений",
+    "STOPPED": "остановлена",
+    "PACKAGE_DELETED": "формат размещения удалён",
+    "NO_MONEY": "закончились деньги на балансе",
+}
+ORD_STATUS_LABELS = {"ACTIVE": "активен"}
+
+
+def issue_label(code) -> str:
+    return ISSUE_LABELS.get(code) or f"другая причина ({code})"
+
+
+def ord_status_label(v) -> str | None:
+    """or_status объявления по-человечески: «активен; коды: превышен дневной лимит». Строка (старая форма) — как
+    статус. None — статуса нет."""
+    if isinstance(v, dict):
+        st = v.get("status") or v.get("major_status")
+        codes = [c for c in v.get("codes") or [] if c]
+    elif isinstance(v, str) and v.strip():
+        st, codes = v.strip(), []
+    else:
+        return None
+    text = ORD_STATUS_LABELS.get(st) or (f"другой статус ({st})" if st else "статус не указан")
+    if codes:
+        text += "; коды: " + ", ".join(issue_label(c) for c in codes)
+    return text
+
+
 GROUP_STATUS_LABELS = {"active": "активна", "blocked": "на паузе", "deleted": "удалена"}
 
 

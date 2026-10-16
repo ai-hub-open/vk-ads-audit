@@ -266,7 +266,7 @@ def test_no_access_line_only_for_users_lists(tmp_path):
                       "error": "429 limits 0", "no_access": True}]}
     ds = build_dataset(raw, *D, collect_log=log)
     lines = limitations(ds, log, None)
-    assert any(x.startswith("Не удалось получить vk_ads_remarketing_pixels_list") for x in lines)
+    assert any(x.startswith("Не удалось получить список пикселей") for x in lines)  # третий живой прогон: в отчёте русское название вызова, не имя инструмента
     assert not any("Нет доступа к базам клиентов" in x for x in lines)
 
 

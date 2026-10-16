@@ -493,3 +493,64 @@ def test_new_group_with_zero_reach_gets_note_and_clear_f3_reason(tmp_path):
                for n in ds["notes"])
     f3 = row(checklist(ds), "F3")
     assert f3["status"] == "unknown" and f3["reason"] == "частота за период не определена: VK не отдаёт охват за период"
+
+
+# ---- 3. Отображение: статус ОРД, коды VK, доказательства и ограничения — по-русски ----
+
+def test_or_status_object_shown_humanly(tmp_path):
+    from scripts.render_report import render
+    raw = tmp_path / "raw"
+    ord_ok = {"codes": [], "major_status": "ACTIVE", "status": "ACTIVE"}
+    ord_lim = {"codes": ["OUT_OF_DAY_LIMIT"], "major_status": "ACTIVE", "status": "ACTIVE"}
+    cabinet(raw, [_active(1)], banners_by_group={1: [
+        {"id": 11, "status": "active", "ord_marker": "M1", "or_status": ord_ok},
+        {"id": 12, "status": "active", "ord_marker": "M2", "or_status": ord_lim},
+        {"id": 13, "status": "active", "ord_marker": "M3", "or_status": {**ord_lim, "codes": ["SOMETHING_NEW"]}}]})
+    ds = build_dataset(raw, *D)
+    assert ds["banners"][1]["ord_status"] == ord_lim                    # структура, а не repr словаря
+    html = render(ds, {**res(ds), "checklist": checklist(ds)})
+    assert "Статус в ОРД: активен — 1" in html or "активен — 1" in html
+    assert "активен; коды: превышен дневной лимит — 1" in html
+    assert "другая причина (SOMETHING_NEW)" in html
+    assert "major_status" not in html and "{'codes'" not in html and "OUT_OF_DAY_LIMIT" not in html
+
+
+def test_issue_labels_and_blocking_action():
+    from scripts.features import issue_label
+    assert issue_label("OUT_OF_DAY_LIMIT") == "превышен дневной лимит"
+    assert issue_label("AD_PLAN_STOPPED") == "кампания остановлена"
+    assert issue_label("NO_MONEY") == "закончились деньги на балансе"
+    assert issue_label("WHATEVER_ELSE") == "другая причина (WHATEVER_ELSE)"
+    f = found(make_ds([make_group(1, issues=["NO_MONEY"])]), "blocking_issues")[0]
+    assert f["action"] == "Устранить причину: закончились деньги на балансе"
+
+
+def test_finding_evidence_rendered_with_russian_labels():
+    from scripts.render_report import render
+    g1 = make_group(1, stats=stats(5000, 50000, 500, 0))
+    ds = make_ds([g1, make_group(2, issues=["NO_MONEY"])])
+    html = render(ds, {**res(ds), "checklist": checklist(ds)})
+    for raw_key in ("ref_source", "limit_rub", "<th>issues", "<th>spent", "account None", ">group ", "median",
+                    "NO_MONEY"):
+        assert raw_key not in html, raw_key
+    assert "опорный CPA" in html and "закончились деньги на балансе" in html
+
+
+def test_every_evidence_key_of_eval_cabinets_has_label(tmp_path):
+    from evals.run_evals import _dataset
+    from evals.fixtures import CABINETS
+    from scripts.render_report import EVIDENCE_LABELS
+    keys = set()
+    for name in CABINETS:
+        ds, _ = _dataset(name, tmp_path)
+        keys |= {k for f in res(ds)["findings"] for k in f["evidence"]}
+    assert keys - set(EVIDENCE_LABELS) == set()
+
+
+def test_failed_call_limitation_is_human():
+    from scripts.render_report import limitations
+    err = ('{\n  "error": true,\n  "status": 504,\n  "code": "upstream_timeout",\n  "detail": {"hint": "Повторите"}}')
+    log = {"calls": [{"tool": "vk_ads_remarketing_pixels_list", "arguments": {}, "ok": False, "error": err}]}
+    lines = limitations(make_ds([make_group(1)]), log)
+    bad = [x for x in lines if x.startswith("Не удалось получить")]
+    assert bad == ["Не удалось получить список пикселей: ошибка VK 504 (upstream_timeout)"]

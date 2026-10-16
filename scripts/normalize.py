@@ -87,6 +87,13 @@ def _ratios(spent: float, shows: int, clicks: int, conv: int) -> dict:
             "cpa": round(spent / conv, 2) if conv else None}
 
 
+def _ord_status(v):
+    if isinstance(v, dict):
+        return {"status": v.get("status"), "major_status": v.get("major_status"),
+                "codes": [str(c) for c in v.get("codes") or [] if c]}
+    return None if v in (None, "") else str(v)
+
+
 def _reach_frequency(u: dict, shows: int) -> dict:
     """Охват и частота из uniques. Третий живой прогон: reach 0 при миллионах показов, total и increment без
     подтверждённого смысла — reach 0 при показах > 0 — «нет данных» (None); частота — только показы / охват,
@@ -482,10 +489,10 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
             "age_days": (d_to - parse_dt(b["created"]).date()).days if parse_dt(b.get("created")) else None,
             "erid": (None if b["id"] in erid_blind or not any(k in observed_b for k in ERID_KEYS)
                      else str(first_known(b, ERID_KEYS, observed_b) or "")),
-            # статус ОРД — только справочно: смысл значений or_status не подтверждён, в проверку A2 не идёт
-            "ord_status": (None if b["id"] in ord_status_blind
-                           or first_known(b, ORD_STATUS_KEYS, observed_b) in (None, "")
-                           else str(first_known(b, ORD_STATUS_KEYS, observed_b))),
+            # статус ОРД — только справочно, в проверку A2 не идёт. MCP 0.12.0: объект {"codes", "major_status",
+            # "status"} — храним как есть (подписи — features.ord_status_label), а не repr словаря
+            "ord_status": _ord_status(None if b["id"] in ord_status_blind
+                                      else first_known(b, ORD_STATUS_KEYS, observed_b)),
             "stats": bstats,
         })
 
@@ -543,7 +550,7 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
     lists_collected = bool(read_calls(raw_dir, "vk_ads_users_lists_list"))
     lists_no_access = _no_access_to_lists(collect_log)
     if lists_no_access:
-        notes.append("Нет доступа к базам клиентов (vk_ads_users_lists_list): проверки, зависящие от баз, "
+        notes.append("Нет доступа к базам клиентов: проверки, зависящие от баз, "
                      "не выполнялись — не хватает прав у подключения.")
     return {
         "period": {"from": date_from, "to": date_to, "days": (d_to - d_from).days + 1},

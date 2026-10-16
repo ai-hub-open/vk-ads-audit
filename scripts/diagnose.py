@@ -21,11 +21,11 @@ from pathlib import Path
 try:
     from scripts._console import setup_console
     from scripts._workspace import SKILL_ROOT, resolve_workspace
-    from scripts.features import is_active_group, is_live_group, parse_dt, plural
+    from scripts.features import is_active_group, is_live_group, issue_label, parse_dt, plural
 except ImportError:  # запуск напрямую
     from _console import setup_console
     from _workspace import SKILL_ROOT, resolve_workspace
-    from features import is_active_group, is_live_group, parse_dt, plural
+    from features import is_active_group, is_live_group, issue_label, parse_dt, plural
 
 LEVEL_ORDER = {"red": 0, "orange": 1, "green": 2, "white": 3}
 DEFAULT_THRESHOLDS = SKILL_ROOT / "references" / "thresholds.json"
@@ -249,7 +249,8 @@ def blocking_issues(ds, th, ctx):
             _seen(ctx, "blocking_issues")
         if _active(g, th) and codes:
             out.append(finding("blocking_issues", "orange", "group", g, "VK сообщает, почему группа не крутится",
-                               {"issues": codes}, "Устранить причину: " + ", ".join(codes)))
+                               {"issues": codes},
+                               "Устранить причину: " + ", ".join(issue_label(c) for c in codes)))
     return out
 
 

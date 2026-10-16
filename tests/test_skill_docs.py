@@ -150,7 +150,8 @@ def test_report_limitation_lines_match_docs():
     import re
     src = (SKILL_ROOT / "scripts" / "normalize.py").read_text(encoding="utf-8")
     lim = _ref("limitations.md")
-    for fragment in ("Частота и охват за период не определены для", "Нет доступа к базам клиентов (vk_ads_users_lists_list)",
+    # «Нет доступа…» — без имени инструмента в тексте для клиента (третий живой прогон)
+    for fragment in ("Частота и охват за период не определены для", "Нет доступа к базам клиентов: проверки",
                      "MCP не возвращает размер сегментов и связи с базами клиентов"):
         assert fragment in src and fragment.split(" (")[0].split(" для")[0] in lim, fragment
     assert re.search(r"def import_response", (SKILL_ROOT / "scripts" / "raw_store.py").read_text(encoding="utf-8"))

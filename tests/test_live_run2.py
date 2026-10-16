@@ -104,7 +104,8 @@ def _fail(tool, args, err="HTTP 502"):
 
 
 def _not_got(lines, tool):
-    return [x for x in lines if x.startswith(f"Не удалось получить {tool}")]
+    from scripts.render_report import TOOL_LABELS   # третий живой прогон: русское название вызова
+    return [x for x in lines if x.startswith(f"Не удалось получить {TOOL_LABELS[tool]}")]
 
 
 def test_failure_followed_by_same_successful_call_in_log_is_hidden(tmp_path):
@@ -145,7 +146,7 @@ def test_render_cli_reads_raw_to_hide_recovered_failures(tmp_path):
     (ws / "collect_log.json").write_text(json.dumps({"calls": [_fail("vk_ads_ad_plans_list", {})]}),
                                          encoding="utf-8")
     assert render_main(["--workspace", str(ws), "--slug", "t"]) == 0
-    assert "Не удалось получить vk_ads_ad_plans_list" not in (ws / "АУДИТ_t.html").read_text(encoding="utf-8")
+    assert "Не удалось получить список кампаний" not in (ws / "АУДИТ_t.html").read_text(encoding="utf-8")
 
 
 def test_no_access_then_success_is_not_no_access(tmp_path):
@@ -311,9 +312,10 @@ def test_or_status_shown_in_report_as_reference():
           make_banner(13, 1, erid="C", ord_status="pending")]
     ds = make_ds([make_group(1)], bs)
     html = render(ds, {**res(ds), "checklist": checklist(ds)})
-    # ревью: имя поля API клиенту не показываем — подпись по-русски
-    assert "Статус в ОРД (справочно, значения VK как есть)" in html and "or_status" not in html
-    assert "registered — 2" in html and "pending — 1" in html
+    # ревью: имя поля API клиенту не показываем — подпись по-русски; третий живой прогон: известные статусы
+    # переводятся («активен»), незнакомые — «другой статус (…)»
+    assert "Статус в ОРД (справочно)" in html and "or_status" not in html
+    assert "другой статус (registered) — 2" in html and "другой статус (pending) — 1" in html
     plain = make_ds([make_group(1)], [make_banner(11, 1, erid="A")])
     assert "Статус в ОРД" not in render(plain, {**res(plain), "checklist": checklist(plain)})
 

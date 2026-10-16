@@ -202,7 +202,7 @@ def test_no_access_line_in_report_limitations(tmp_path):
     ds = build_dataset(raw, *D, collect_log=log)
     lines = limitations(ds, log, checklist(ds))
     assert any("нет доступа к базам клиентов" in x.lower() for x in lines)
-    assert not any(x.startswith("Не удалось получить vk_ads_users_lists_list") for x in lines)
+    assert not any(x.startswith("Не удалось получить базы клиентов") for x in lines)  # третий живой прогон: в отчёте русское название вызова, не имя инструмента
 
 
 # ---- 10. сегменты без size и relations (живая форма) ----

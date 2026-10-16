@@ -19,7 +19,7 @@ try:
     from scripts._workspace import resolve_workspace
     from scripts.diagnose import (_banners, bidding_label, load_thresholds, utm_unconfirmed_groups,
                                   utm_unconfirmed_reason, utm_unconfirmed_text)
-    from scripts.features import group_status_label, is_live_group
+    from scripts.features import group_status_label, is_live_group, issue_label, ord_status_label
     from scripts.normalize import zero_spend_head
     from scripts.raw_store import mark_recovered
 except ImportError:  # запуск напрямую
@@ -27,7 +27,7 @@ except ImportError:  # запуск напрямую
     from _workspace import resolve_workspace
     from diagnose import (_banners, bidding_label, load_thresholds, utm_unconfirmed_groups, utm_unconfirmed_reason,
                           utm_unconfirmed_text)
-    from features import group_status_label, is_live_group
+    from features import group_status_label, is_live_group, issue_label, ord_status_label
     from normalize import zero_spend_head
     from raw_store import mark_recovered
 
@@ -84,6 +84,134 @@ def _num(v) -> str:
     return escape(json.dumps(v, ensure_ascii=False) if isinstance(v, (list, dict)) else str(v))
 
 
+# ---- доказательства находок по-русски (третий живой прогон: в HTML шли ref_source median, issues [...], account None) ----
+
+EVIDENCE_LABELS = {
+    "spent": "расход", "shows": "показы", "clicks": "клики", "conversions": "конверсии", "cpa": "CPA",
+    "ref_cpa": "опорный CPA", "ref_source": "источник опорного CPA", "limit_rub": "порог расхода без конверсий",
+    "cpc": "CPC", "avg_cpc": "средний CPC по кабинету", "ctr_pct": "CTR", "threshold_pct": "порог CTR",
+    "frequency": "частота", "ctr_first_half_pct": "CTR первой половины периода",
+    "ctr_second_half_pct": "CTR второй половины периода", "spent_7d": "расход за 7 дней", "cpa_7d": "CPA за 7 дней",
+    "cpa_30d": "CPA за 30 дней", "conversions_30d": "конверсии за 30 дней", "conversions_7d": "конверсии за 7 дней",
+    "conversions_per_week": "конверсий в неделю", "needed": "нужно", "avg_daily_spent": "средний расход в день",
+    "budget_day_rub": "дневной бюджет", "minimum_rub": "минимум", "needed_rub": "нужно в день",
+    "recommended_rub": "рекомендуется", "budget_max_rub": "бюджет до", "small_groups": "мелких групп",
+    "max_price_rub": "предельная цена", "month_spend_rub": "расход в пересчёте на месяц",
+    "banners_total": "объявлений всего", "banners_active": "активных объявлений", "active_banners": "активных объявлений",
+    "moderation_status": "статус модерации", "reasons": "причины", "can_remoderate": "перемодерация доступна",
+    "issues": "причины VK", "age_days": "возраст группы, дней", "groups": "группы",
+    "segments_unused": "неиспользуемых сегментов",
+    "only_in_deleted_or_archived_groups": "из них стояли только в удалённых или архивных группах",
+    "examples": "примеры", "objective": "цель", "banners_without_erid": "объявлений без маркировки",
+    "without_utm": "объявлений без UTM", "site_banners": "объявлений на сайт", "active_groups": "активных групп",
+    "missing_layers": "не хватает слоёв", "actual": "фактические доли", "target": "рекомендованные доли",
+    "guessed_share": "доля расхода групп со слоем по догадке", "layers": "слои",
+    "default_names": "названий по умолчанию", "total": "названий всего", "share": "доля",
+    "groups_with_spend": "групп с расходом", "period_days": "период поиска, дней", "regions": "регионы",
+    "age_span": "возрастной диапазон, лет", "shared_segments": "общие сегменты", "segment_size": "размер сегмента",
+    "minimum": "минимум", "days_since_update": "дней без обновления", "missing": "не хватает форматов",
+    "present": "есть форматы", "banners_with_content": "объявлений с контентом",
+    "newest_creative_age_days": "самому новому креативу, дней",
+    "edited_recently": "объявлений с недавней правкой (дата смены креатива не видна)", "banners": "объявления",
+    "hours": "часов на модерации", "norm_hours": "норма, часов", "bounce_rate": "доля отказов", "visits": "визиты",
+    "ratio": "визиты / клики", "metrika_goal_reaches": "достижений целей в Метрике", "vk_conversions": "конверсий в VK",
+    "potential": "потенциал", "client_answer": "ответ клиента",
+}
+_RUB_KEYS = {"spent", "cpa", "ref_cpa", "limit_rub", "cpc", "avg_cpc", "spent_7d", "cpa_7d", "cpa_30d",
+             "avg_daily_spent", "budget_day_rub", "minimum_rub", "needed_rub", "recommended_rub", "budget_max_rub",
+             "max_price_rub", "month_spend_rub"}
+_SHARE_KEYS = {"share", "guessed_share", "bounce_rate", "ratio"}
+REF_SOURCE_LABELS = {"target": "целевой CPA клиента", "median": "медиана CPA групп кабинета"}
+LAYER_LABELS = {"warm": "тёплый", "lal": "LAL", "cold": "холодный", "warm_lal": "тёплый + LAL"}
+OBJECTIVE_LABELS = {"site_conversions": "конверсии на сайте", "leadads": "лид-формы",
+                    "socialengagement": "вовлечение в сообщество"}
+MODERATION_LABELS = {"banned": "отклонено", "rejected": "отклонено", "allowed": "одобрено", "new": "на модерации",
+                     "delayed": "на модерации", "moderating": "на модерации"}
+ENTITY_LABELS = {"group": "группа", "banner": "объявление", "plan": "кампания", "segment": "сегмент", "list": "база",
+                 "account": "кабинет"}
+
+
+def _ev_text(v) -> str:
+    """Значение без сырого repr: списки через запятую, словари «ключ: значение»."""
+    if isinstance(v, list):
+        return ", ".join(_ev_text(x) for x in v)
+    if isinstance(v, dict):
+        return "; ".join(f"{k}: {_ev_text(x)}" for k, x in v.items() if x not in (None, "", []))
+    if isinstance(v, (bool, int, float)) or v is None:
+        return _num(v)
+    return str(v)
+
+
+def _shares(d) -> str:
+    return ", ".join(f"{LAYER_LABELS.get(k, k)} {x * 100:.0f} %" for k, x in d.items() if isinstance(x, (int, float)))
+
+
+def evidence_value(key, v) -> str:
+    if key in _RUB_KEYS and isinstance(v, (int, float)) and not isinstance(v, bool):
+        return fmt_rub(v)
+    if key.endswith("_pct") and isinstance(v, (int, float)):
+        return fmt_pct(v)
+    if key in _SHARE_KEYS and isinstance(v, (int, float)):
+        return f"{v * 100:.0f} %"
+    if key == "ref_source":
+        return REF_SOURCE_LABELS.get(v, "—")
+    if key == "issues" and isinstance(v, list):
+        return ", ".join(issue_label(c) for c in v)
+    if key in ("missing_layers", "layers") and isinstance(v, list):
+        return ", ".join(LAYER_LABELS.get(x, str(x)) for x in v)
+    if key in ("actual", "target") and isinstance(v, dict):
+        return _shares(v)
+    if key == "objective":
+        return OBJECTIVE_LABELS.get(v) or f"другая цель ({v})"
+    if key == "moderation_status":
+        return MODERATION_LABELS.get(v) or f"другой статус ({v})"
+    return _ev_text(v)
+
+
+def _evidence_rows(evidence: dict) -> str:
+    """Строки доказательства: подпись по-русски, None и пустое не выводим (раньше — «account None», «—»)."""
+    return "".join(f"<tr><th>{escape(EVIDENCE_LABELS.get(k, 'показатель'))}</th>"
+                   f"<td>{escape(evidence_value(k, v))}</td></tr>"
+                   for k, v in evidence.items() if v not in (None, "", []))
+
+
+def _entity_text(e: dict) -> str:
+    kind = ENTITY_LABELS.get(e.get("type"), "объект")
+    parts = [kind + (f" {e['id']}" if e.get("id") is not None else "")]
+    if e.get("name") and e.get("type") != "account":
+        parts.append(e["name"])
+    return " · ".join(parts)
+
+
+TOOL_LABELS = {
+    "vk_ads_ad_plans_list": "список кампаний", "vk_ads_campaigns_list": "список групп",
+    "vk_ads_banners_list": "объявления группы", "vk_ads_remarketing_segments_list": "список сегментов",
+    "vk_ads_users_lists_list": "базы клиентов", "vk_ads_remarketing_pixels_list": "список пикселей",
+    "vk_ads_statistics_day": "статистику по дням", "vk_ads_statistics_summary": "сводную статистику",
+    "vk_ads_account_info": "данные кабинета", "vk_ads_auth_check": "проверку доступа",
+}
+
+
+def _error_brief(error) -> str:
+    """Причина сбоя без сырого JSON: «ошибка VK 504 (upstream_timeout)»; не JSON — текст без имени инструмента."""
+    text = str(error or "").strip()
+    body = text[text.index("{"):] if "{" in text else ""
+    try:
+        obj = json.loads(body) if body else None
+    except ValueError:
+        obj = None
+    if isinstance(obj, dict):
+        status, code = obj.get("status"), obj.get("code")
+        detail = obj.get("detail") if isinstance(obj.get("detail"), dict) else {}
+        err = detail.get("error") if isinstance(detail.get("error"), dict) else {}
+        code = code or err.get("code")
+        head = f"ошибка VK {status}" if isinstance(status, int) else "ошибка VK"
+        return head + (f" ({code})" if code else "")
+    if ": " in text and text.split(": ", 1)[0].startswith("vk_ads_"):
+        text = text.split(": ", 1)[1]
+    return text[:200] or "причина не указана"
+
+
 def _lists_no_access(c: dict) -> bool:
     return c.get("tool") == "vk_ads_users_lists_list" and bool(c.get("no_access")) and not c.get("ok")
 
@@ -110,7 +238,8 @@ def limitations(ds: dict, collect_log=None, checklist=None, th=None) -> list:
     for c in calls:
         skip = c.get("superseded") or c.get("recovered") or c.get("preflight") or _lists_no_access(c)
         if not c.get("ok") and not skip:
-            lines.append(f"Не удалось получить {c['tool']}: {c.get('error')}")
+            lines.append(f"Не удалось получить {TOOL_LABELS.get(c['tool'], 'данные VK')}: "
+                         f"{_error_brief(c.get('error'))}")
     if any(_lists_no_access(c) and not c.get("recovered") for c in calls) and not any(
             "Нет доступа к базам клиентов" in n for n in ds.get("notes") or []):
         lines.append("Нет доступа к базам клиентов: проверки, зависящие от баз, не выполнялись.")
@@ -135,14 +264,14 @@ def limitations(ds: dict, collect_log=None, checklist=None, th=None) -> list:
 
 
 def _finding_html(f) -> str:
-    ev = "".join(f"<tr><th>{escape(k)}</th><td>{_num(v)}</td></tr>" for k, v in f["evidence"].items())
+    ev = _evidence_rows(f["evidence"])
     effect = f"<p>Эффект: <b>{fmt_rub(f['effect_rub'])}</b></p>" if f["effect_rub"] else ""
     note = f.get("client_note")
     note_html = f'<p class="note">Объяснено клиентом: {escape(note)}</p>' if isinstance(note, str) and note.strip() else ""
     cls = "f explained" if note_html else "f"
     return (f'<div class="{cls}"><h3>{escape(f["title"])}</h3>'
-            f'<p class="muted">{escape(f["entity"]["type"])} {escape(str(f["entity"]["id"]))} · '
-            f'{escape(f["entity"]["name"])} · надёжность: {CONF.get(f["confidence"], f["confidence"])}'
+            f'<p class="muted">{escape(_entity_text(f["entity"]))} · '
+            f'надёжность: {CONF.get(f["confidence"], "—")}'
             + (f' · проверка {escape(f["check"])}' if f.get("check") else "") + '</p>'
             f'<table>{ev}</table>{effect}<p>Действие: {escape(f["action"])}</p>{note_html}</div>')
 
@@ -187,14 +316,15 @@ def _checklist_html(cl) -> str:
 
 
 def _ord_status_html(ds, th) -> str:
-    """Справочно: статусы ОРД (or_status) активных объявлений. Смысл значений не подтверждён — показываем как есть,
-    на A2 и находки не влияет."""
-    counts = Counter(b["ord_status"] for b in _banners(ds)
-                     if b.get("ord_status") and b["status"] in th["active_statuses"])
+    """Справочно: статусы ОРД (or_status) активных объявлений по-человечески («активен; коды: превышен дневной
+    лимит»), на A2 и находки не влияет."""
+    counts = Counter(ord_status_label(b.get("ord_status")) for b in _banners(ds)
+                     if b["status"] in th["active_statuses"])
+    counts.pop(None, None)
     if not counts:
         return ""
     parts = " · ".join(f"{escape(k)} — {v}" for k, v in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
-    return ("<p class='muted'>Статус в ОРД (справочно, значения VK как есть) у активных объявлений — на проверку "
+    return ("<p class='muted'>Статус в ОРД (справочно) у активных объявлений — на проверку "
             f"маркировки A2 не влияет: {parts}</p>")
 
 
