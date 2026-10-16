@@ -142,6 +142,21 @@ def import_response(raw_dir: Path, tool: str, arguments: dict, source: Path) -> 
     data, _ = _unwrap_mcp(data)
     if not isinstance(data, dict):
         raise ValueError(f"{source.name}: ответ должен быть JSON-объектом, а не {type(data).__name__}")
+    if data.get("error") is True:
+        raise ValueError(f"{source.name}: это ответ-ошибка инструмента (error: true), а не данные кабинета — "
+                         "повтори вызов или запиши сбой в collect_log.json")
+    if all(k in data for k in REQUIRED_KEYS):
+        raise ValueError(f"{source.name}: файл уже в формате raw/ (tool, arguments, response) — "
+                         "сюда нужен сам ответ инструмента, без обёртки")
+    if tool.endswith("_list") or tool.startswith("vk_ads_statistics_"):
+        if not isinstance(data.get("items"), list):
+            raise ValueError(f"{source.name}: у {tool} в ответе должен быть список items — "
+                             "похоже, файл обрезан или это ответ другого инструмента")
+        count, got = data.get("count"), len(data["items"])
+        if isinstance(count, int) and not isinstance(count, bool) and count > got and not arguments.get("offset"):
+            print(f"⚠ {source.name}: в ответе {got} записей из {count} — это одна страница. Получи остальные "
+                  "вызовами с offset и импортируй каждую отдельно, иначе часть кабинета выпадет из аудита.",
+                  file=sys.stderr)
     return write_call(raw_dir, tool, arguments, data)
 
 
@@ -181,8 +196,9 @@ def main(argv=None) -> int:
     q = sub.add_parser("import", help="положить сохранённый файлом ответ MCP в raw/")
     q.add_argument("--workspace", required=True)
     q.add_argument("--tool", required=True)
-    q.add_argument("--arguments", help="JSON-объект аргументов вызова (как переданы инструменту)")
-    q.add_argument("--arguments-file", help="то же, но из файла")
+    grp = q.add_mutually_exclusive_group()
+    grp.add_argument("--arguments", help="JSON-объект аргументов вызова (как переданы инструменту)")
+    grp.add_argument("--arguments-file", help="то же, но из файла")
     q.add_argument("--from", dest="source", required=True, help="файл с ответом MCP")
     args = parser.parse_args(argv)
     if args.cmd == "import":

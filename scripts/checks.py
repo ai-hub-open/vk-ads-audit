@@ -12,10 +12,10 @@ from __future__ import annotations
 from collections import defaultdict
 
 try:
-    from scripts.diagnose import (ASK_FUNNELS, FUNNEL_LABELS, _active, _banner_groups, _date, _feat, _layer, _live,
-                                  _run_days, funnel_status)
+    from scripts.diagnose import (ASK_FUNNELS, FUNNEL_LABELS, _active, _banner_groups, _banners, _date, _feat, _layer,
+                                  _live, _run_days, funnel_status)
 except ImportError:  # запуск напрямую
-    from diagnose import (ASK_FUNNELS, FUNNEL_LABELS, _active, _banner_groups, _date, _feat, _layer, _live,
+    from diagnose import (ASK_FUNNELS, FUNNEL_LABELS, _active, _banner_groups, _banners, _date, _feat, _layer, _live,
                           _run_days, funnel_status)
 
 BLOCKS = [("A", "Техническая настройка"), ("B", "Структура аккаунта"), ("C", "Таргетинг"),
@@ -50,7 +50,7 @@ def run_checks(ds: dict, th: dict, findings: list, evaluated: dict | None = None
     rows: list = []
     cov = ds["coverage"]
     live = [g for g in _live(ds) if _active(g, th)]
-    banners = [b for b in ds["banners"] if b["status"] in th["active_statuses"]]
+    banners = [b for b in _banners(ds) if b["status"] in th["active_statuses"]]
     no_banners = ("unknown", "объявления не собирались") if not cov.get("banners") else OK
     no_stats = ("unknown", "статистика не собрана") if not cov.get("stats", True) else OK
 
@@ -189,28 +189,40 @@ def run_checks(ds: dict, th: dict, findings: list, evaluated: dict | None = None
     by_rules("E4", "Свежие креативы в топ-группах", ["stale_creatives"],
              _first(no_banners, partial_gate, ("unknown", "дата создания известна не у всех объявлений")
                     if any(b.get("age_days") is None for b in banners) else OK))
-    classified_banners = [b for b in banners if (b.get("ratios") or b.get("has_video")) and not b.get("ratios_unknown")]
+    classified_banners = [b for b in banners if b.get("ratios") or b.get("has_video")]
     e5_gate = _first(content_gate, partial_gate,
                      OK if len(classified_banners) >= 2 else ("unknown", "форматы определены меньше чем у двух объявлений"))
     if e5_gate[0]:
         add("E5", "Тестировались разные форматы", *e5_gate)
     else:
         sigs = {(tuple(b.get("ratios") or []), bool(b.get("has_video"))) for b in classified_banners}
-        add("E5", "Тестировались разные форматы", "pass" if len(sigs) > 1 else "fail",
-            "" if len(sigs) > 1 else "все объявления одного формата")
+        if len(sigs) > 1:
+            add("E5", "Тестировались разные форматы", "pass")
+        elif any(b.get("ratios_unknown") for b in classified_banners):
+            add("E5", "Тестировались разные форматы", "unknown",
+                "соотношение сторон не читается из роли контента — одинаковы ли форматы, не определить")
+        else:
+            add("E5", "Тестировались разные форматы", "fail", "все объявления одного формата")
     by_rules("E6", "Призыв к действию в тексте", ["no_cta_text"],
              _first(no_banners, partial_gate, _known_banner(banners, "text", "текст объявления")))
     by_rules("E7", "Конкретная кнопка", ["generic_button"],
-             _first(no_banners, partial_gate, _known_banner(banners, "cta", "кнопка объявления")))
+             _first(no_banners, partial_gate, OK if any(b.get("cta") for b in banners)
+                    else ("unknown", "кнопка не задана в объявлениях (call_to_action пустой)")))
     by_rules("E8", "Нет отклонённых объявлений", ["rejected_banners"], no_banners)
     by_rules("E9", "Модерация не затянулась", ["moderation_stuck"], no_banners)
 
     # F
     by_rules("F1", "CTR не ниже 0,3 %", ["low_ctr"], no_stats)
     by_rules("F2", "Нет CPC-выбросов", ["cpc_outlier"], no_stats)
-    freq_gate = OK if any(g["stats"].get("frequency") for g in live if not g.get("stats_missing")) else (
-        "unknown", "частота за период не определена: охват и частота доступны только за всё время жизни группы")
-    by_rules("F3", "Нет выгорания (частота)", ["burnout"], _first(no_stats, freq_gate))
+    eligible = [g for g in live if not g.get("stats_missing") and _run_days(ds, g) >= th["min_run_days"]
+                and g["stats"]["shows"] >= th["burnout_min_shows"]]
+    if no_stats[0] or fired.get("burnout"):
+        by_rules("F3", "Нет выгорания (частота)", ["burnout"], no_stats)    # реальная находка не прячется за «unknown»
+    elif not eligible or any(g["stats"].get("frequency") is None for g in eligible):
+        add("F3", "Нет выгорания (частота)", "unknown",
+            "частота за период не определена: охват и частота доступны только за всё время жизни группы")
+    else:
+        by_rules("F3", "Нет выгорания (частота)", ["burnout"])
     long_enough = ds["period"]["days"] >= 30
     by_rules("F4", "Динамика CPA за 7 / 30 дней", ["cpa_trend"],
              no_stats if no_stats[0] else (OK if long_enough else ("unknown", "период аудита короче 30 дней")))

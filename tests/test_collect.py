@@ -305,8 +305,9 @@ class SpendClient(FakeClient):
             return {"id": 77, "username": "acc", "currency": "RUB"}
         if tool == "vk_ads_statistics_day" and (arguments or {}).get("entity") == "users":
             self._check(tool, arguments)
-            rows = [{"date": "2026-09-01", "base": {"spent": self.spent, "shows": 10}}] if self.spent != "0" else []
-            return {"items": [{"id": 77, "rows": rows}] if rows else [], "total": {}}
+            base = {"shows": 0, "spent": self.spent}
+            return {"items": [{"id": 77, "total": {"base": base}, "rows": [{"date": "2026-09-01", "base": base}]}],
+                    "total": {"base": base}}
         return super().call(tool, arguments)
 
 
@@ -349,14 +350,15 @@ def test_preflight_failure_does_not_stop_collection(tmp_path):
 
     client = Broken(groups(1))
     log = collect(client, tmp_path / "raw", "2026-09-01", "2026-09-30")
-    assert log["no_spend"] is False and log["errors"] >= 1 and tools(client, "vk_ads_campaigns_list")
+    assert log["no_spend"] is False and log["errors"] == 0 and tools(client, "vk_ads_campaigns_list")
+    assert any(c.get("preflight") and not c["ok"] for c in log["calls"])
 
 
 def test_total_spend_shapes():
     assert total_spend({"items": [{"id": 1, "rows": [{"base": {"spent": "10.5"}}, {"base": {"spent": "4,5"}}]}]}) == 15.0
     assert total_spend({"items": [{"id": 1, "total": {"base": {"spent": "7"}}}]}) == 7.0
     assert total_spend({"items": [], "total": {"base": {"spent": "3"}}}) == 3.0
-    assert total_spend({"items": []}) == 0.0 and total_spend(None) == 0.0
+    assert total_spend({"items": []}) is None and total_spend(None) is None
 
 
 def test_cli_zero_spend_exit_5(tmp_path, monkeypatch, capsys):

@@ -35,6 +35,13 @@ RATIO_TOL = 0.04
 _LAL_RE = re.compile(r"lookalike|look-alike|\blal\b|похож", re.I)
 
 
+def is_live_group(g) -> bool:
+    """Группа не удалена и не в архиве (VK отдаёт архивные с issues [{"code": "ARCHIVED"}] — в dataset это коды)."""
+    issues = g.get("issues") or []
+    codes = {i.get("code") if isinstance(i, dict) else i for i in issues}
+    return g.get("status") != "deleted" and "ARCHIVED" not in codes
+
+
 def observed_keys(dicts) -> set:
     return {k for d in dicts if isinstance(d, dict) for k in d}
 

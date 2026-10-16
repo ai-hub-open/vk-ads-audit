@@ -93,33 +93,38 @@ def _user_id(info):
     return None
 
 
-def _num(v) -> float:
+def _num(v):
+    """Число из строки/числа или None (нечитаемо): «не прочитали» не равно «0 ₽»."""
+    if v is None or isinstance(v, bool):
+        return None
     try:
         return float(str(v).replace(" ", "").replace(",", "."))
-    except (TypeError, ValueError):
-        return 0.0
+    except ValueError:
+        return None
 
 
-def total_spend(resp) -> float:
-    """Расход за период из ответа statistics_day(entity=users): сумма строк по дням, иначе total."""
+def total_spend(resp):
+    """Расход за период из ответа statistics_day(entity=users): items[].total.base.spent (строка), иначе сумма
+    rows[].base.spent, иначе верхний total. None — расход прочитать не удалось (форма не та, пусто, не число):
+    это не «0 ₽», предполётка тогда пропускается."""
     if not isinstance(resp, dict):
-        return 0.0
-    items = resp.get("items") if isinstance(resp.get("items"), list) else []
-    spend = 0.0
-    for it in items:
+        return None
+    parsed = []
+    for it in resp.get("items") if isinstance(resp.get("items"), list) else []:
         if not isinstance(it, dict):
             continue
-        rows = it.get("rows")
-        base = (it.get("total") or {}).get("base") or {}
-        if "spent" in base:
-            spend += _num(base["spent"])
-        elif isinstance(rows, list) and rows:
-            spend += sum(_num(((r or {}).get("base") or {}).get("spent")) for r in rows if isinstance(r, dict))
-        else:
-            spend += _num(((it.get("total") or {}).get("base") or {}).get("spent"))
-    if not items:
-        spend = _num(((resp.get("total") or {}).get("base") or {}).get("spent"))
-    return round(spend, 2)
+        total = _num(((it.get("total") or {}).get("base") or {}).get("spent")) if isinstance(it.get("total"), dict) else None
+        if total is not None:
+            parsed.append(total)
+            continue
+        rows = [_num(((r or {}).get("base") or {}).get("spent")) for r in it.get("rows") or [] if isinstance(r, dict)]
+        if rows and all(v is not None for v in rows):
+            parsed.append(sum(rows))
+    if not parsed:
+        top = resp.get("total")
+        v = _num(((top or {}).get("base") or {}).get("spent")) if isinstance(top, dict) else None
+        return None if v is None else round(v, 2)
+    return round(sum(parsed), 2)
 
 
 def _archived(g: dict) -> bool:
@@ -149,9 +154,11 @@ class _Collector:
             text = text.replace(s, mask(s))
         return text
 
-    def _record(self, tool, args, error=None, no_access=False):
+    def _record(self, tool, args, error=None, no_access=False, preflight=False):
         entry = {"tool": tool, "arguments": args, "ok": error is None,
                  "error": None if error is None else self.clean(error)}
+        if preflight:
+            entry["preflight"] = True   # сбой предполётки в «Ограничения» клиента не идёт
         if no_access:
             entry["no_access"] = True   # 429 с limits 0: нет прав; отчёт скажет «нет доступа к базам клиентов»
         self.log.append(entry)
@@ -163,15 +170,15 @@ class _Collector:
         except ForbiddenToolError:
             raise
         except McpError as e:
-            self._fail(tool, args, e)
+            self._fail(tool, args, e, preflight=True)
             return None
 
-    def _fail(self, tool, args, e: McpError):
+    def _fail(self, tool, args, e: McpError, preflight=False):
         min_date = _wrong_date(e)
         if min_date is not None:   # ответ сервера про глубину истории — не сырая ошибка, а понятное объяснение
-            self._record(tool, args, str(DateLimitError(min_date, from_server=True)))
+            self._record(tool, args, str(DateLimitError(min_date, from_server=True)), preflight=preflight)
             raise DateLimitError(min_date, from_server=True)
-        self._record(tool, args, str(e), getattr(e, "no_access", False))
+        self._record(tool, args, str(e), getattr(e, "no_access", False), preflight=preflight)
 
     def call(self, tool: str, args: dict):
         try:
@@ -236,9 +243,14 @@ def collect(client, raw_dir: Path, date_from: str, date_to: str, mode: str = "de
         uid = _user_id(c.probe("vk_ads_account_info", {}))
         if uid is not None:   # предполётка: нулевой расход за период — собирать нечего
             resp = c.probe("vk_ads_statistics_day", {"entity": "users", "ids": str(uid), **period})
-            if resp is not None and total_spend(resp) == 0:
+            spent = total_spend(resp) if resp is not None else None
+            if spent == 0:
                 log["no_spend"] = True
                 return log
+            if spent is None:
+                log["preflight"] = "пропущена: расход за период прочитать не удалось"
+        else:
+            log["preflight"] = "пропущена: id пользователя в ответе account_info не найден"
         c.listing("vk_ads_ad_plans_list", {"fields": PLAN_FIELDS})
         groups = c.listing_with_fallback("vk_ads_campaigns_list", {"fields": GROUP_FIELDS}, GROUP_FIELDS_BASE)
         if groups is None:
@@ -273,7 +285,7 @@ def collect(client, raw_dir: Path, date_from: str, date_to: str, mode: str = "de
         log["aborted"] = c.clean(f"{type(e).__name__}: {e}")
         raise
     finally:
-        log["errors"] = sum(1 for x in c.log if not x["ok"])
+        log["errors"] = sum(1 for x in c.log if not x["ok"] and not x.get("preflight"))
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(log, ensure_ascii=False, indent=1), encoding="utf-8")
     return log
@@ -329,6 +341,10 @@ def main(argv=None) -> int:
     except DateLimitError as e:
         print(f"✗ {e} Более ранний период через MCP не собрать.")
         return 2
+    if log.get("no_spend") and args.mode == "quick":
+        print(f"✗ За период {args.date_from} — {date_to} кабинет не откручивал (расход 0 ₽): быстрый анализ строить "
+              "не на чем. Выберите другой день или другой кабинет (--account-id).")
+        return 5
     if log.get("no_spend"):
         print(f"✗ За период {args.date_from} — {date_to} расход в кабинете 0 ₽: собирать нечего. "
               "Выберите другой период или другой кабинет (--account-id).")

@@ -26,16 +26,16 @@ try:
     from scripts._workspace import resolve_workspace
     from scripts.features import (AUTO_UTM_KEYS, ERID_KEYS, EXCLUDE_KEYS, PLAN_BUDGET_KEYS, SIZE_KEYS, UPDATED_KEYS,
                                   SEGMENT_RELATION_KEYS, banner_text, content_features, first_known, is_lal,
-                                  layer_of, observed_keys, parse_dt, targeting_features, url_strings,
-                                  users_list_ids)
+                                  is_live_group, layer_of, observed_keys, parse_dt, targeting_features,
+                                  url_strings, users_list_ids)
     from scripts.raw_store import items_of, read_calls
 except ImportError:  # запуск напрямую
     from _console import setup_console
     from _workspace import resolve_workspace
     from features import (AUTO_UTM_KEYS, ERID_KEYS, EXCLUDE_KEYS, PLAN_BUDGET_KEYS, SIZE_KEYS, UPDATED_KEYS,
                           SEGMENT_RELATION_KEYS, banner_text, content_features, first_known, is_lal,
-                          layer_of, observed_keys, parse_dt, targeting_features, url_strings,
-                          users_list_ids)
+                          is_live_group, layer_of, observed_keys, parse_dt, targeting_features,
+                          url_strings, users_list_ids)
     from raw_store import items_of, read_calls
 
 CONVERSION_SOURCE = {"leadads": "vk.result", "socialengagement": "vk.result"}
@@ -241,6 +241,11 @@ def _blind_ids(raw_dir: Path, tool: str, keys) -> set:
 
 
 def _auto_utm(g, observed):
+    """Группа размечена: enable_utm true или в utm непустой шаблон (живой прогон: ключ enable_utm у части групп
+    опущен — отсутствие = выключено, если ключ встречался у других)."""
+    utm = g.get("utm")
+    if isinstance(utm, str) and utm.strip():
+        return True
     if not any(k in observed for k in AUTO_UTM_KEYS):
         return None
     return bool(first_known(g, AUTO_UTM_KEYS, observed))
@@ -262,9 +267,7 @@ def windows_of(daily: list, d_from: date, d_to: date) -> dict:
     return out
 
 
-def _is_live(g: dict) -> bool:
-    """Группа не удалена и не в архиве (issues ARCHIVED): для гигиены и проверок она не существует."""
-    return g["status"] != "deleted" and "ARCHIVED" not in (g.get("issues") or [])
+_is_live = is_live_group   # единый помощник (features.py): для гигиены и проверок архивной группы не существует
 
 
 def _lifetime_fits(g: dict, d_from: date, period_stats: dict, summary_stats: dict) -> bool:
@@ -292,7 +295,7 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
     summary, summary_ids, summary_calls = _entity_stats(raw_dir, "vk_ads_statistics_summary", "campaigns", period)
     bsummary, _, _ = _entity_stats(raw_dir, "vk_ads_statistics_summary", "banners", period)
     daily_raw, daily_ids, daily_calls = _entity_stats(raw_dir, "vk_ads_statistics_day", "campaigns", period)
-    bdaily, bdaily_ids, _ = _entity_stats(raw_dir, "vk_ads_statistics_day", "banners", period)
+    bdaily, bdaily_ids, bdaily_calls = _entity_stats(raw_dir, "vk_ads_statistics_day", "banners", period)
     has_stats = bool(summary_calls or daily_calls)
     notes: list = []
 
@@ -339,7 +342,7 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
                 stats = {**stats, "reach": sm["reach"], "frequency": sm["frequency"]}
             else:
                 unmeasured_freq.append(g["id"])
-        elif g["id"] in summary_ids:  # старый raw/: сводка до обнаружения, что она отдаёт всё время
+        elif daily_calls == 0 and g["id"] in summary_ids:  # только старый raw/ без дней: сводка (всё время) — не подмена
             stats = stats_from((summary.get(g["id"]) or {}).get("total"), obj)
         else:
             stats = stats_from(None, obj)
@@ -358,7 +361,8 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
             "features": targeting_features(g.get("targetings"), observed_t),
             "layer": layer_of(_segment_ids(g.get("targetings")), segments_by_id) if "targetings" in g else None,
             "max_price_rub": _price(g.get("max_price")),
-            "auto_utm": None if g["id"] in utm_blind else _auto_utm(g, observed_g),
+            "auto_utm": _auto_utm(g, observed_g) if (g["id"] not in utm_blind or isinstance(g.get("utm"), str))
+            else None,
             "windows": windows_of(daily, d_from, d_to),
             "banner_ids": [b["id"] for b in banners if b["_group"] == g["id"]],
         }
@@ -371,7 +375,7 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
         if b["id"] in bdaily:
             obj = objective_of.get(b["_group"])
             bstats = aggregate([stats_from(r, obj) for r in bdaily[b["id"]].get("rows") or []])
-        elif b["id"] in bsummary:  # старый raw/
+        elif bdaily_calls == 0 and b["id"] in bsummary:  # только старый raw/ без дней
             bstats = stats_from(bsummary[b["id"]].get("total"), objective_of.get(b["_group"]))
         else:
             bstats = None

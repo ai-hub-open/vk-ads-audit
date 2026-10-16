@@ -84,6 +84,9 @@
 - `vk_ads_users_lists_list` → HTTP 429 с `limits: {"1": 0}`: у подключения нет прав на базы клиентов, повтор бесполезен.
 - Сегменты приходят только с `id, name, pass_condition, flags, created, updated` — без `size` и без `relations` (дефект MCP):
   размер LAL-сегментов и связь база → сегмент недоступны.
+- Группа: `utm` — строка-шаблон UTM (`utm_source=vk_ads&utm_medium=cpa&utm_campaign=…&utm_term={{gender}}_{{age}}`) или null;
+  `enable_utm: true` приходит только у части групп, у остальных ключ опущен (нет ключа = выключено). Группа считается
+  размеченной при `enable_utm` true или непустом `utm`.
 - `call_to_action` у всех объявлений кабинета — `null`; роли контента вида `video_landscape_180s` (соотношения сторон в
   имени нет); удалённые и архивные группы приходят с `issues: [{"code": "ARCHIVED"}]`.
 - В claude.ai и Claude Desktop у коннектора vk-ads нет персональной ссылки подключения — сбор всегда идёт путём A.

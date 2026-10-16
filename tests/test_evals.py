@@ -67,4 +67,4 @@ def test_healthy_f3_checked_with_period_frequency_and_expert_burnout_fires(tmp_p
     assert st["F3"] == "fail"           # группа 9 создана внутри периода: частота из сводки применима
     cl = checklist_of("healthy", tmp_path)
     st = {c["id"]: c["status"] for b in cl["blocks"] for c in b["checks"]}
-    assert st["F3"] in ("unknown", "pass")   # группы старше периода: частота не определена — не ❌
+    assert st["F3"] == "unknown"   # группы старше периода: частота не определена — не ❌ и не ✅
