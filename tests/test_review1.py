@@ -91,7 +91,18 @@ def test_f3_fail_stays_when_burnout_fired_despite_unknown_others():
     assert status(checklist(ds), "F3")["status"] == "fail"
 
 
+def test_f3_unknown_when_some_group_stats_missing():
+    ds = make_ds([_g(1, 1.5), _g(2, None, stats_missing=True)])
+    assert status(checklist(ds), "F3")["status"] == "unknown"
+
+
 # ---- 3. E5 ----
+
+def test_e5_unknown_with_unreadable_image_ratio_among_equal_images():
+    bs = [make_banner(11, 1, ratios=["1:1"], content_ids=[1]), make_banner(12, 1, ratios=["1:1"], content_ids=[2]),
+          make_banner(13, 1, ratios=[], has_video=False, content_ids=[3], ratios_unknown=True)]
+    assert status(checklist(make_ds([make_group(1)], bs)), "E5")["status"] == "unknown"
+
 
 def test_e5_not_fail_with_unknown_ratio_video_among_images():
     bs = [make_banner(11, 1, ratios=["1:1"], content_ids=[1]), make_banner(12, 1, ratios=["1:1"], content_ids=[2]),

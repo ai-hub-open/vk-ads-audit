@@ -189,14 +189,17 @@ def run_checks(ds: dict, th: dict, findings: list, evaluated: dict | None = None
     by_rules("E4", "Свежие креативы в топ-группах", ["stale_creatives"],
              _first(no_banners, partial_gate, ("unknown", "дата создания известна не у всех объявлений")
                     if any(b.get("age_days") is None for b in banners) else OK))
-    classified_banners = [b for b in banners if b.get("ratios") or b.get("has_video")]
+    classified_banners = [b for b in banners if b.get("ratios") or b.get("has_video") or b.get("ratios_unknown")]
     e5_gate = _first(content_gate, partial_gate,
                      OK if len(classified_banners) >= 2 else ("unknown", "форматы определены меньше чем у двух объявлений"))
     if e5_gate[0]:
         add("E5", "Тестировались разные форматы", *e5_gate)
     else:
-        sigs = {(tuple(b.get("ratios") or []), bool(b.get("has_video"))) for b in classified_banners}
-        if len(sigs) > 1:
+        # Подпись — только по читаемым соотношениям; у объявления с нечитаемой ролью известно лишь «видео или нет».
+        sigs = {(tuple(b.get("ratios") or []), bool(b.get("has_video")))
+                for b in classified_banners if not b.get("ratios_unknown")}
+        unk_video = any(b.get("ratios_unknown") and b.get("has_video") for b in classified_banners)
+        if len(sigs) > 1 or (unk_video and any(not video for _, video in sigs)):
             add("E5", "Тестировались разные форматы", "pass")
         elif any(b.get("ratios_unknown") for b in classified_banners):
             add("E5", "Тестировались разные форматы", "unknown",
@@ -218,6 +221,8 @@ def run_checks(ds: dict, th: dict, findings: list, evaluated: dict | None = None
                 and g["stats"]["shows"] >= th["burnout_min_shows"]]
     if no_stats[0] or fired.get("burnout"):
         by_rules("F3", "Нет выгорания (частота)", ["burnout"], no_stats)    # реальная находка не прячется за «unknown»
+    elif any(g.get("stats_missing") for g in live):
+        add("F3", "Нет выгорания (частота)", "unknown", "статистика получена не по всем группам")
     elif not eligible or any(g["stats"].get("frequency") is None for g in eligible):
         add("F3", "Нет выгорания (частота)", "unknown",
             "частота за период не определена: охват и частота доступны только за всё время жизни группы")
