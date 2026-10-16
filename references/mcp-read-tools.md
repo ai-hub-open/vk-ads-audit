@@ -56,7 +56,7 @@
 - Списки: `{"count"?, "items": [...], "offset"?}` — `count` бывает не у всех.
 - Статистика: `{"items": [{"id", "total": {"base": {...}, "uniques": {...}, ...}, "rows"?: [{"date", "base", ...}]}], "total": {...}}`;
   `rows` — только у `statistics_day`. Сущностей без показов в `items` может не быть — это нули.
-  `statistics_summary` игнорирует период (всё время), `statistics_day` его уважает; глубина дневной истории около 430 дней.
+  `statistics_summary` игнорирует период (всё время), `statistics_day` его уважает; глубина дневной истории 366 дней.
 - `base`: `shows`, `clicks`, `goals`, `spent` (строка, ₽), `cpm`/`cpc`/`cpa` (строки), `ctr`/`cr` — **уже проценты**
   (608 кликов на 117 469 показов → `ctr: 0.5176` = 0,52 %), `vk.{goals,result,cpa,cr,cpr}`.
 - `uniques`: `reach`, `frequency`.
@@ -73,7 +73,12 @@
 - `ctr` и `cr` в статистике — уже проценты; деньги в статистике — строки в рублях.
 - `vk_ads_statistics_summary` игнорирует `date_from` / `date_to` и отдаёт итоги за всё время (баг MCP, передан
   платформе); `vk_ads_statistics_day` период уважает. Итоги периода — сумма дней (для объявлений — `entity=banners`).
-- Глубина дневной статистики около 430 дней: `400 WRONG_DATE: minimal allowed date is '2025-8-11'`.
+- Глубина дневной статистики 366 дней (окно включает сегодня). MCP отказывает сам до обращения к VK: «доступен период с
+  2025-10-16 по 2026-10-16 … Укажите date_from не раньше 2025-10-16»; старый ответ VK — `400 WRONG_DATE: minimal allowed date
+  is '2025-8-11'`. Скрипты разбирают дату из обоих текстов.
+- `vk_ads_account_info` отдаёт id пользователя в верхнем `id`. `vk_ads_statistics_day(entity="users", ids=<id>, date_from,
+  date_to, metrics="base")` → `{"items": [{"id", "total": {"base": {"spent": "0", ...}}, "rows": [{"date", "base"}]}],
+  "total": {"base": {...}}}`; предполётка читает `items[].total.base.spent` (строка).
 - Поле группы `auto_utm` → `400 unknown_resource_fields`; приходят `enable_utm` (bool) и `utm` (у удалённой группы null).
 - Поля объявления `erid`, `ord_token`, `ord_erid` → 400; маркировка ОРД лежит в `ord_marker` (строка, например `2VtzquiRr5b`).
 - `vk_ads_users_lists_list` → HTTP 429 с `limits: {"1": 0}`: у подключения нет прав на базы клиентов, повтор бесполезен.
@@ -88,8 +93,6 @@
 
 - Конверсии: `base.goals` (сайт) и `base.vk.result` (лид-формы, сообщество) — верно ли по целям (`CONVERSION_SOURCE` в `scripts/normalize.py`).
 - Допуск проверки `ctr_units` (`check_sanity`) против округления `ctr` на стороне VK.
-- Форма ответа `vk_ads_account_info` (путь B берёт id пользователя из `id`, `user_id` или `user.id`; не нашёл — предполётка
-  расхода пропускается) и форма ответа `statistics_day(entity=users)` — подтвердить живым прогоном.
 - Сколько `ids` принимает один вызов статистики (сейчас пачки по 50).
 - Имена полей объявления: `moderation_status`, `moderation_reasons`, `user_can_request_remoderation`.
 - Реальный набор значений `autobidding_mode`: пока виден только `max_goals`; значение ручного режима неизвестно

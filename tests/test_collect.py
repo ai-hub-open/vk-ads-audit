@@ -374,8 +374,8 @@ def test_period_older_than_history_refused_before_any_call(tmp_path):
     old = (history_start(today) - timedelta(days=1)).isoformat()
     with pytest.raises(DateLimitError) as exc:
         collect(client, tmp_path / "raw", old, "2026-09-30", today=today)
-    assert exc.value.min_date == history_start(today) == date(2025, 8, 12)
-    assert "2025-08-12" in str(exc.value) and client.calls == []
+    assert exc.value.min_date == history_start(today) == date(2025, 10, 16)
+    assert "2025-10-16" in str(exc.value) and client.calls == []
     collect(client, tmp_path / "raw", history_start(today).isoformat(), "2026-09-30", today=today)  # граница годна
 
 
@@ -425,3 +425,42 @@ def test_archived_groups_skip_banners_but_keep_statistics(tmp_path):
     assert [a["campaign_id"] for a in tools(client, "vk_ads_banners_list")] == [1]
     day = [a for a in tools(client, "vk_ads_statistics_day") if a["entity"] == "campaigns"]
     assert day[0]["ids"] == "1,2"                       # расход архивной группы остаётся в итогах
+
+
+MCP_REFUSAL = ("Ошибка: Статистика по дням хранится 366 дней: доступен период с 2025-10-16 по 2026-10-16 (по Москве). "
+               "date_from 2024-11-01 раньше начала истории — за такие дни ВК вернул бы нули вместо данных. "
+               "Укажите date_from не раньше 2025-10-16.")
+
+
+def test_history_is_366_days_window_inclusive_of_today():
+    assert history_start(date(2026, 10, 16)) == date(2025, 10, 16)
+
+
+def test_mcp_refusal_message_parsed_into_min_date(tmp_path):
+    class Refuses(FakeClient):
+        def call(self, tool, arguments=None):
+            self._check(tool, arguments)
+            raise McpError("vk_ads_statistics_day: " + MCP_REFUSAL, status=400)
+
+    with pytest.raises(DateLimitError) as exc:
+        collect(Refuses(groups(1)), tmp_path / "raw", "2026-09-01", "2026-09-30")
+    assert exc.value.min_date == date(2025, 10, 16) and exc.value.from_server
+    entry = [c for c in read_log(tmp_path)["calls"] if not c["ok"]][0]
+    assert "2025-10-16" in entry["error"] and "нули вместо данных" not in entry["error"]
+
+
+def test_preflight_reads_total_base_spent_string_from_live_shape(tmp_path):
+    live = {"items": [{"id": 13983692,
+                       "total": {"base": {"shows": 0, "clicks": 0, "goals": 0, "spent": "0", "not_ad_spent": "0",
+                                          "cpm": "0", "cpc": "0", "cpa": "0", "ctr": 0, "cr": 0, "vk": {}}},
+                       "rows": [{"date": "2026-10-10", "base": {"spent": "0", "shows": 0}}]}],
+            "total": {"base": {"spent": "0"}}}
+    assert total_spend(live) == 0.0
+    live["items"][0]["total"]["base"]["spent"] = "1234.50"
+    live["items"][0]["rows"][0]["base"]["spent"] = "0"      # total приоритетнее строк
+    assert total_spend(live) == 1234.5
+
+
+def test_user_id_from_top_level_id():
+    from scripts.collect import _user_id
+    assert _user_id({"id": 13983692, "username": "u"}) == 13983692

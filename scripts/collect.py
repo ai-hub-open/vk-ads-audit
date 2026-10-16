@@ -13,7 +13,7 @@ collect.py — путь B: скрипт сам собирает кабинет �
   3 — критический сбой: не собрана опись кампаний (collect_log.json: critical);
   4 — raw/ уже содержит файлы: нужна новая рабочая папка или очистка raw/;
   5 — за период в кабинете нет расхода: сбор не запускался, предложи другой период или кабинет.
-  (2 также — период старше доступной истории статистики, ~430 дней.)
+  (2 также — период старше доступной истории статистики, ~366 дней.)
 
     python -m scripts.collect --probe [--account-id ID]
     python -m scripts.collect --workspace <абс. путь> --date-from 2026-09-01 --date-to 2026-09-30 \
@@ -51,8 +51,9 @@ BANNER_FIELDS_BASE = ("id,name,campaign_id,status,moderation_status,moderation_r
 GROUP_FIELDS = GROUP_FIELDS_BASE + ",enable_utm,utm"
 BANNER_FIELDS = BANNER_FIELDS_BASE + ",call_to_action,ord_marker"
 STATS_CHUNK = 50
-HISTORY_DAYS = 430          # глубина дневной статистики VK: дальше — 400 WRONG_DATE (минимальная дата в тексте ошибки)
-_MIN_DATE_RE = re.compile(r"minimal allowed date is '(\d{4})-(\d{1,2})-(\d{1,2})'", re.I)
+HISTORY_DAYS = 366          # глубина дневной статистики VK: MCP отказывает сам, VK — 400 WRONG_DATE (минимальная дата в тексте)
+_MIN_DATE_RES = (re.compile(r"minimal allowed date is '(\d{4})-(\d{1,2})-(\d{1,2})'", re.I),   # VK: WRONG_DATE
+                 re.compile(r"доступен период с (\d{4})-(\d{1,2})-(\d{1,2})"))                    # отказ самого MCP
 METRICS = "all"
 LISTS = ("vk_ads_remarketing_segments_list", "vk_ads_users_lists_list", "vk_ads_remarketing_pixels_list")
 MODES = ("deep", "quick")
@@ -74,7 +75,7 @@ class DateLimitError(Exception):
 
 def _wrong_date(error: McpError):
     """Минимальная дата из ошибки WRONG_DATE (`minimal allowed date is '2025-8-11'`) или None."""
-    m = _MIN_DATE_RE.search(str(error))
+    m = next((m for m in (r.search(str(error)) for r in _MIN_DATE_RES) if m), None)
     if not m:
         return None
     return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
@@ -109,7 +110,10 @@ def total_spend(resp) -> float:
         if not isinstance(it, dict):
             continue
         rows = it.get("rows")
-        if isinstance(rows, list) and rows:
+        base = (it.get("total") or {}).get("base") or {}
+        if "spent" in base:
+            spend += _num(base["spent"])
+        elif isinstance(rows, list) and rows:
             spend += sum(_num(((r or {}).get("base") or {}).get("spent")) for r in rows if isinstance(r, dict))
         else:
             spend += _num(((it.get("total") or {}).get("base") or {}).get("spent"))
@@ -209,7 +213,7 @@ class _Collector:
 
 
 def history_start(today: date) -> date:
-    return today - timedelta(days=HISTORY_DAYS)
+    return today - timedelta(days=HISTORY_DAYS - 1)   # окно в 366 дней включает сегодня
 
 
 def collect(client, raw_dir: Path, date_from: str, date_to: str, mode: str = "deep", *,

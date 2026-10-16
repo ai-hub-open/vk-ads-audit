@@ -131,7 +131,7 @@ def test_skill_documents_live_run_fixes():
     # предполётка расхода, большие ответы, нет прав, глубина истории
     assert 'entity="users"' in SKILL and "кодом 5" in SKILL and "| 5 |" in SKILL
     assert "raw_store import" in SKILL and "--arguments-file" in SKILL
-    assert '"no_access": true' in SKILL and "~430 дней" in SKILL
+    assert '"no_access": true' in SKILL and "~366 дней" in SKILL
     assert "игнорирует даты" in SKILL and "суммой дней" in SKILL
     tools, lim, rules, log = (_ref("mcp-read-tools.md"), _ref("limitations.md"),
                               _ref("diagnostic-rules.md"), (SKILL_ROOT / "CHANGELOG.md").read_text(encoding="utf-8"))
