@@ -297,7 +297,7 @@ def run_checks(ds: dict, th: dict, findings: list, evaluated: dict | None = None
         add("F3", "Нет выгорания (частота)", "na", "нечего проверять: нет групп с достаточными показами")
     elif any(g["stats"].get("frequency") is None for g in eligible):
         add("F3", "Нет выгорания (частота)", "unknown",
-            "частота за период не определена: охват и частота доступны только за всё время жизни группы")
+            "частота за период не определена: VK не отдаёт охват за период")
     else:
         by_rules("F3", "Нет выгорания (частота)", ["burnout"])
     long_enough = ds["period"]["days"] >= 30

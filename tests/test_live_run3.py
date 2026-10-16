@@ -460,3 +460,36 @@ def test_c13_fails_for_used_small_lal():
     segs = [{"id": 5, "name": "LAL покупатели", "lal": True, "size": 10}]
     ds = make_ds([make_group(1, segment_ids=[5], layer="lal")], segments=segs)
     assert found(ds, "lal_small_source") and row(checklist(ds), "C13")["status"] == "fail"
+
+
+# ---- 2.5. Охват и частота: reach 0 при показах — «нет данных», частоту из uniques не берём ----
+
+def test_zero_reach_with_shows_is_unknown_and_frequency_not_taken():
+    from scripts.normalize import stats_from
+    live = {"base": {"spent": "1000", "shows": 300000, "clicks": 3000, "goals": 0, "ctr": 1.0},
+            "uniques": {"reach": 0, "total": 9000000, "increment": 4000, "frequency": 2.4}}
+    s = stats_from(live, "site_conversions")
+    assert s["reach"] is None and s["frequency"] is None
+    odd = {"base": {"spent": "10", "shows": 3000, "clicks": 3}, "uniques": {"reach": 1500, "frequency": 7.0}}
+    s = stats_from(odd, None)
+    assert s["reach"] == 1500 and s["frequency"] == 2.0          # показы / охват, а не uniques.frequency
+    idle = stats_from({"base": {"shows": 0}, "uniques": {"reach": 0, "frequency": 0}}, None)
+    assert idle["reach"] == 0 and idle["frequency"] is None
+
+
+def test_new_group_with_zero_reach_gets_note_and_clear_f3_reason(tmp_path):
+    from scripts.raw_store import write_call
+    from tests.test_normalize import _stat_call
+    raw = tmp_path / "raw"
+    cabinet(raw, [_active(1, created="2026-09-01 10:00:00")])
+    rows = day_rows(30, shows=1000)
+    write_call(raw, "vk_ads_statistics_summary", {"entity": "campaigns", "ids": "1", "metrics": "base,uniques"},
+               {"items": [{"id": 1, "total": {"base": {"spent": "3000", "shows": 30000, "clicks": 300, "goals": 30},
+                                              "uniques": {"reach": 0, "total": 900000, "frequency": 2.5}}}]})
+    _stat_call(raw, "vk_ads_statistics_day", "campaigns", [1], [{"id": 1, "rows": rows}])
+    ds = build_dataset(raw, *D)
+    assert ds["groups"][0]["stats"]["frequency"] is None
+    assert any(n.startswith("Частота и охват за период не определены для 1 группы: VK не отдаёт охват за период")
+               for n in ds["notes"])
+    f3 = row(checklist(ds), "F3")
+    assert f3["status"] == "unknown" and f3["reason"] == "частота за период не определена: VK не отдаёт охват за период"

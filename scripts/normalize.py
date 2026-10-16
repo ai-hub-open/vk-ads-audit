@@ -6,7 +6,8 @@ normalize.py — raw/ → dataset.json. Единицы приводятся ТО
 - CTR считаем сами из clicks/shows, значение VK (оно уже в процентах) храним для проверки единиц;
 - итоги периода — сумма строк statistics_day: statistics_summary отдаёт только всё время (даты в неё не передаются),
   поэтому охват и частота берутся из сводки только для групп, чья жизнь целиком в периоде;
-- metrics=base у дней: блока uniques нет — охват и частота «не определены» (None), а не 0;
+- metrics=base у дней: блока uniques нет — охват и частота «не определены» (None), а не 0; reach 0 при показах — тоже
+  None, частота — только показы / охват (uniques.frequency, total, increment не берём: смысл не подтверждён);
 - конверсии — base.vk.result («Результат» по цели оптимизации, как в кабинете VK; решение методиста, третий живой
   прогон: base.goals — все цели пикселя, у site_conversions в разы больше результата и бывает больше кликов); CPA =
   расход / результат. base.goals хранится справочно (goals_all). Блока vk нет (старые raw/) — конверсии из goals,
@@ -86,6 +87,16 @@ def _ratios(spent: float, shows: int, clicks: int, conv: int) -> dict:
             "cpa": round(spent / conv, 2) if conv else None}
 
 
+def _reach_frequency(u: dict, shows: int) -> dict:
+    """Охват и частота из uniques. Третий живой прогон: reach 0 при миллионах показов, total и increment без
+    подтверждённого смысла — reach 0 при показах > 0 — «нет данных» (None); частота — только показы / охват,
+    uniques.frequency / total / increment не берём. Нет uniques — None, а не 0."""
+    reach = None if u.get("reach") in (None, "") else int(u["reach"])
+    if reach == 0 and shows > 0:
+        reach = None
+    return {"reach": reach, "frequency": round(shows / reach, 2) if reach else None}
+
+
 def _conversions(b: dict) -> tuple:
     """(конверсии, взяты ли из goals). «Результат» VK — vk.result (vk.goals ему равен); нет блока vk — base.goals."""
     vk = b.get("vk")
@@ -110,8 +121,7 @@ def stats_from(block, objective) -> dict:
            "goals_all": int(b.get("goals") or 0),   # все цели пикселя — справочно, правила на них не смотрят
            **_ratios(spent, shows, clicks, conv),
            "vk_ctr_pct": None if b.get("ctr") in (None, "") else round(float(b["ctr"]), 4),   # у VK уже проценты
-           "reach": None if u.get("reach") in (None, "") else int(u["reach"]),   # нет uniques — нет данных, не 0
-           "frequency": float(u.get("frequency") or 0) or None}
+           **_reach_frequency(u, shows)}
     if from_goals:
         out["conversions_from_goals"] = True   # старый ответ без «Результата» VK — заметка в «Ограничениях»
     return out
@@ -408,7 +418,7 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
         if g["id"] in daily_ids:  # нет в items при покрытии вызовом — показов не было, это нули
             stats = aggregate(daily)
             sm = stats_from((summary.get(g["id"]) or {}).get("total"), obj) if g["id"] in summary else None
-            if sm and daily and _lifetime_fits(g, d_from, stats, sm):
+            if sm and daily and _lifetime_fits(g, d_from, stats, sm) and sm["reach"] is not None:
                 stats = {**stats, "reach": sm["reach"], "frequency": sm["frequency"]}
             else:
                 unmeasured_freq.append(g["id"])
@@ -502,8 +512,9 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
         notes.append(CONVERSION_NOTE)
     no_freq = [g for g in live_groups if g["id"] in unmeasured_freq and g["stats"]["shows"] > 0]
     if no_freq:
-        notes.append(f"Частота и охват за период не определены для {_groups_gen(len(no_freq))}: статистика VK отдаёт их "
-                     "только за всё время жизни группы — правила по частоте (выгорание) по ним не применялись.")
+        notes.append(f"Частота и охват за период не определены для {_groups_gen(len(no_freq))}: VK не отдаёт охват за "
+                     "период (сводка — только за всё время жизни группы) — правила по частоте (выгорание) по ним не "
+                     "применялись.")
 
     def named(tool):
         return [{"id": x.get("id"), "name": x.get("name") or ""} for x in _list_items(raw_dir, tool)]
