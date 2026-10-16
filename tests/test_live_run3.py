@@ -415,3 +415,32 @@ def test_rules_do_not_read_goals():
     for mod in (diagnose, checks, quick):
         src = inspect.getsource(mod)
         assert '"goals"' not in src and "'goals'" not in src and "goals_all" not in src, mod.__name__
+
+
+# ---- 2.3. Кнопка объявления — из textblocks.cta_sites_full, если call_to_action пуст ----
+
+def _cta_banner(bid, code, **kw):
+    return {"id": bid, "status": "active", "call_to_action": None,
+            "textblocks": {"title_40_vkads": {"text": "Витамины для всей семьи", "title": ""},
+                           "cta_sites_full": {"text": code, "title": ""}}, **kw}
+
+
+def test_cta_from_textblocks_and_not_in_ad_text(tmp_path):
+    raw = tmp_path / "raw"
+    cabinet(raw, [_active(1)], banners_by_group={1: [_cta_banner(11, "learnMore"), _cta_banner(12, "order"),
+                                                     {**_cta_banner(13, "learnMore"), "call_to_action": "sign_up"}]})
+    by = {b["id"]: b for b in build_dataset(raw, *D)["banners"]}
+    assert [by[i]["cta"] for i in (11, 12, 13)] == ["learnMore", "order", "sign_up"]   # call_to_action главнее
+    assert by[11]["text"] == "Витамины для всей семьи"                               # код кнопки — не текст
+
+
+def test_learn_more_is_generic_visit_site_and_order_are_not():
+    assert "learnMore" in TH["generic_cta"]
+    assert not {"visitSite", "order"} & set(TH["generic_cta"])
+    bs = [make_banner(11, 1, cta="learnMore"), make_banner(12, 1, cta="visitSite"), make_banner(13, 1, cta="order")]
+    ds = make_ds([make_group(1)], bs)
+    f = found(ds, "generic_button")
+    assert len(f) == 1 and f[0]["evidence"]["banners"] == [11]
+    assert row(checklist(ds), "E7")["status"] == "fail"
+    ok = make_ds([make_group(1)], bs[1:])
+    assert row(checklist(ok), "E7")["status"] == "pass"

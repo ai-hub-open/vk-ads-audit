@@ -272,7 +272,7 @@ def run_checks(ds: dict, th: dict, findings: list, evaluated: dict | None = None
              _first(banner_base, _known_banner(banners, "text", "текст объявления")))
     by_rules("E7", "Конкретная кнопка", ["generic_button"],
              _first(banner_base, OK if any(b.get("cta") for b in banners)
-                    else ("unknown", "кнопка не задана в объявлениях (call_to_action пустой)")))
+                    else ("unknown", "кнопка не задана в объявлениях (поле кнопки пустое)")))
     by_rules("E8", "Нет отклонённых объявлений", ["rejected_banners"],
              _first(no_live, no_banners, sample_gate(len(all_banners))))
     by_rules("E9", "Модерация не затянулась", ["moderation_stuck"],

@@ -287,7 +287,8 @@ def test_failed_preflight_not_in_client_limitations(tmp_path):
 
 def test_e7_unknown_reason_wording():
     ds = make_ds([make_group(1)], [make_banner(11, 1), make_banner(12, 1)])
-    assert status(checklist(ds), "E7")["reason"] == "кнопка не задана в объявлениях (call_to_action пустой)"
+    # третий живой прогон: имя поля API (call_to_action) в отчёт не идёт; кнопку ищем и в textblocks.cta_sites_full
+    assert status(checklist(ds), "E7")["reason"] == "кнопка не задана в объявлениях (поле кнопки пустое)"
 
 
 def test_quick_zero_spend_wording(tmp_path, monkeypatch, capsys):

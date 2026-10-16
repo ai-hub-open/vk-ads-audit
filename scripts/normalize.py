@@ -34,7 +34,7 @@ try:
     from scripts._workspace import resolve_workspace
     from scripts.features import (AUTO_UTM_KEYS, ERID_KEYS, EXCLUDE_KEYS, ORD_STATUS_KEYS, PLAN_BUDGET_KEYS, SIZE_KEYS,
                                   UPDATED_KEYS, plural,
-                                  SEGMENT_RELATION_KEYS, banner_text, content_features, first_known, is_lal,
+                                  SEGMENT_RELATION_KEYS, banner_cta, banner_text, content_features, first_known, is_lal,
                                   is_active_group, is_keyword_segment, is_live_group, layer_info, observed_keys,
                                   parse_dt, targeting_features, url_strings, users_list_ids)
     from scripts.collect import total_spend
@@ -44,7 +44,7 @@ except ImportError:  # запуск напрямую
     from _workspace import resolve_workspace
     from features import (AUTO_UTM_KEYS, ERID_KEYS, EXCLUDE_KEYS, ORD_STATUS_KEYS, PLAN_BUDGET_KEYS, SIZE_KEYS,
                           UPDATED_KEYS, plural,
-                          SEGMENT_RELATION_KEYS, banner_text, content_features, first_known, is_lal,
+                          SEGMENT_RELATION_KEYS, banner_cta, banner_text, content_features, first_known, is_lal,
                           is_active_group, is_keyword_segment, is_live_group, layer_info, observed_keys,
                           parse_dt, targeting_features, url_strings, users_list_ids)
     from collect import total_spend
@@ -464,7 +464,7 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
             "moderation_status": b.get("moderation_status"), "moderation_reasons": b.get("moderation_reasons"),
             "issues": _codes(b.get("issues")),
             "can_remoderate": bool(b.get("user_can_request_remoderation")),
-            "cta": (str(b["call_to_action"]) if b.get("call_to_action") not in (None, "") else None),
+            "cta": banner_cta(b),
             "text": banner_text(b.get("textblocks")),
             "urls": url_strings(b.get("urls")),
             **content_features(b.get("content")),

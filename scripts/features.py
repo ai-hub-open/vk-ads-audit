@@ -171,11 +171,36 @@ def url_strings(v) -> list:
     return out
 
 
+CTA_TEXTBLOCK = "cta_sites_full"   # подтверждено 16.10.2026: кнопка лежит в textblocks.cta_sites_full.text (learnMore …)
+
+
+def _is_cta_block(key) -> bool:
+    return str(key).startswith("cta_")
+
+
 def banner_text(textblocks) -> str:
+    """Текст объявления без блоков кнопки (cta_*): код кнопки (learnMore) — не призыв в тексте."""
     if not isinstance(textblocks, dict):
         return ""
-    parts = [tb.get("text") for tb in textblocks.values() if isinstance(tb, dict)]
+    parts = [tb.get("text") for k, tb in textblocks.items() if isinstance(tb, dict) and not _is_cta_block(k)]
     return " ".join(p for p in parts if isinstance(p, str) and p.strip())
+
+
+def banner_cta(banner) -> str | None:
+    """Кнопка объявления: call_to_action, а если он пуст (живой прогон: null у всех) — textblocks.cta_sites_full.text,
+    затем любой другой блок cta_*. None — кнопки в ответе нет."""
+    cta = banner.get("call_to_action") if isinstance(banner, dict) else None
+    if cta not in (None, ""):
+        return str(cta)
+    tbs = banner.get("textblocks") if isinstance(banner, dict) else None
+    if not isinstance(tbs, dict):
+        return None
+    keys = [CTA_TEXTBLOCK] + sorted(k for k in tbs if _is_cta_block(k) and k != CTA_TEXTBLOCK)
+    for k in keys:
+        text = (tbs.get(k) or {}).get("text") if isinstance(tbs.get(k), dict) else None
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+    return None
 
 
 def is_lal(segment) -> bool:
