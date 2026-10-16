@@ -319,3 +319,33 @@ def test_or_status_shown_in_report_as_reference():
 def test_or_status_documented():
     tools_doc, rules = _ref("mcp-read-tools.md"), _ref("diagnostic-rules.md")
     assert "`or_status`" in tools_doc and "ORD_STATUS_KEYS" in tools_doc and "`or_status`" in rules
+
+
+# ---- 2. неиспользуемые сегменты — одна сводная карточка, а не по карточке на сегмент ----
+
+def _dead(i, segs, status="deleted"):
+    return make_group(i, status=status, segment_ids=list(segs))
+
+
+def test_unused_segments_single_summary_for_cabinet_without_live_groups():
+    segs = [{"id": 100 + i, "name": f"s{i}"} for i in range(24)]
+    groups_ = [_dead(1, [100, 101, 102]), _dead(2, range(103, 110)),
+               _dead(3, range(110, 120), status="active") | {"issues": ["ARCHIVED"]}]
+    ds = make_ds(groups_, segments=segs)
+    fs = found(ds, "unused_segments")
+    assert len(fs) == 1
+    f = fs[0]
+    assert f["level"] == "white" and f["entity"]["type"] == "account" and f["check"] is None
+    assert f["title"] == "24 сегмента не используются ни в одной живой группе"
+    assert f["evidence"]["segments_unused"] == 24 and f["evidence"]["only_in_deleted_or_archived_groups"] == 20
+    assert f["evidence"]["examples"] == [100, 101, 102, 103, 104]
+
+
+def test_unused_segments_counts_only_unused_and_plural():
+    g = make_group(1, segment_ids=[5], excluded_segment_ids=[6])
+    ds = make_ds([g], segments=[{"id": 5, "name": "a"}, {"id": 6, "name": "минус"}, {"id": 7, "name": "никому"}])
+    f = found(ds, "unused_segments")
+    assert len(f) == 1 and f[0]["title"] == "1 сегмент не используется ни в одной живой группе"
+    assert f[0]["evidence"] == {"segments_unused": 1, "only_in_deleted_or_archived_groups": 0, "examples": [7]}
+    used = make_ds([make_group(1, segment_ids=[5])], segments=[{"id": 5, "name": "a"}])
+    assert found(used, "unused_segments") == []

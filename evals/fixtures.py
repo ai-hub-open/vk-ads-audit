@@ -141,7 +141,7 @@ def hygiene(raw: Path) -> dict:
                   segments=(77,))
     return {**P, "target_cpa": None, "expected": {
         ("low_budget", 1), ("rejected_banners", 100), ("duplicate_targeting", 2), ("autodelete_risk", 4),
-        ("banners_per_group", 5), ("unused_segments", 77)},
+        ("banners_per_group", 5), ("unused_segments", None)},          # сводная карточка на кабинет, сегмент 77 — в примерах
         "scope": HYGIENE_SCOPE, "as_of": "2026-10-01T10:00"}
 
 

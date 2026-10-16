@@ -331,14 +331,27 @@ def duplicate_targeting(ds, th, ctx):
     return out
 
 
+def _segments_of(groups) -> set:
+    # исключённый сегмент (минус-аудитория) тоже «используется»
+    return {i for g in groups for i in list(g["segment_ids"]) + list(g.get("excluded_segment_ids") or [])}
+
+
 @rule
 def unused_segments(ds, th, ctx):
-    # исключённый сегмент (минус-аудитория) тоже «используется»
-    used = {i for g in _live(ds) for i in list(g["segment_ids"]) + list(g.get("excluded_segment_ids") or [])}
+    """Одна сводная карточка на кабинет (второй живой прогон: 24 карточки по сегменту — шум)."""
+    used = _segments_of(_live(ds))
+    in_dead = _segments_of(g for g in ds["groups"] if not is_live_group(g))
     _seen(ctx, "unused_segments", len(ds["segments"]))
-    return [finding("unused_segments", "white", "segment", s, "Сегмент не используется ни в одной группе",
-                    {}, "Удалить или запустить на него группу")
-            for s in ds["segments"] if s["id"] not in used]
+    unused = [s["id"] for s in ds["segments"] if s["id"] not in used]
+    if not unused:
+        return []
+    n = len(unused)
+    title = (f"{n} {plural(n, 'сегмент', 'сегмента', 'сегментов')} не "
+             f"{plural(n, 'используется', 'используются', 'используются')} ни в одной живой группе")
+    return [finding("unused_segments", "white", "account", ACCOUNT, title,
+                    {"segments_unused": n, "only_in_deleted_or_archived_groups": sum(1 for i in unused if i in in_dead),
+                     "examples": unused[:5]},
+                    "Удалить лишние сегменты или запустить на них группы")]
 
 
 @rule
