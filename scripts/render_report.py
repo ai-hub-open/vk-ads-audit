@@ -276,11 +276,42 @@ def _finding_html(f) -> str:
             f'<table>{ev}</table>{effect}<p>Действие: {escape(f["action"])}</p>{note_html}</div>')
 
 
+def _objective_label(obj) -> str:
+    return OBJECTIVE_LABELS.get(obj) or (f"другая цель ({obj})" if obj else "цель не указана")
+
+
+def _conversions_by_objective(ds) -> dict:
+    """Конверсии по целям групп, входящих в итоги (кроме удалённых): «Результат» у каждой цели свой."""
+    out: dict = {}
+    for g in ds["groups"]:
+        if g["status"] != "deleted" and (g["stats"]["spent"] or g["stats"]["conversions"]):
+            key = _objective_label(g.get("objective"))
+            out[key] = out.get(key, 0) + g["stats"]["conversions"]
+    return out
+
+
+def _ref_text(findings) -> str:
+    """Опорный CPA в шапке; несколько целей — у каждой свой (медиана внутри цели)."""
+    source = findings.get("ref_source", "none")
+    by_obj = findings.get("ref_by_objective") or {}
+    if source == "target":
+        return f"опорный CPA: {fmt_rub(findings.get('ref_cpa'))} (целевой CPA клиента)"
+    if len(by_obj) > 1:
+        parts = ", ".join(f"{_objective_label(k)} — {fmt_rub(v)}" for k, v in by_obj.items())
+        return f"опорный CPA по целям: {parts} (медиана CPA групп той же цели, цель не задана)"
+    if source == "median":
+        return f"опорный CPA: {fmt_rub(findings.get('ref_cpa'))} (медиана CPA групп кабинета (цель не задана))"
+    return "опорный CPA: — (опорного CPA нет — пороги по минимальному расходу)"
+
+
 CONVERSION_SOURCE_TEXT = "Конверсии — результат по цели оптимизации (как «Результат» в кабинете VK)"
+CONVERSION_FALLBACK_TEXT = "Конверсии — все цели пикселя: «Результат» VK не пришёл, могут быть завышены"
 
 
 def _conversion_source_html(totals) -> str:
     """Из какого показателя взяты конверсии (решение методиста: vk.result), base.goals — справочно."""
+    if totals.get("conversions_from_goals"):   # ревью: «Результат» VK не пришёл — честно, без «справочно»
+        return f"<p class='muted'>{CONVERSION_FALLBACK_TEXT}.</p>"
     goals = totals.get("goals_all")
     extra = f"; все цели пикселя (справочно): {_num(goals)}" if isinstance(goals, int) and goals else ""
     return f"<p class='muted'>{CONVERSION_SOURCE_TEXT}{extra}.</p>"
@@ -340,20 +371,22 @@ def _questions_html(qs) -> str:
 def render(ds: dict, findings: dict, collect_log=None, title: str = "", th=None) -> str:
     th = th or load_thresholds()
     t = ds["totals"]
+    by_obj = _conversions_by_objective(ds)
+    conv_label = "Конверсии (сумма результатов разных целей)" if len(by_obj) > 1 else "Конверсии"
     tiles = [("Расход", fmt_rub(t["spent"])), ("Показы", _num(t["shows"])), ("Клики", _num(t["clicks"])),
-             ("Конверсии", _num(t["conversions"])), ("CPA", fmt_rub(t["cpa"])), ("CTR", fmt_pct(t["ctr_pct"]))]
-    ref = findings.get("ref_cpa")
-    ref_note = {"target": "целевой CPA клиента", "median": "медиана CPA групп кабинета (цель не задана)",
-                "none": "опорного CPA нет — пороги по минимальному расходу"}[findings.get("ref_source", "none")]
+             (conv_label, _num(t["conversions"])), ("CPA", fmt_rub(t["cpa"])), ("CTR", fmt_pct(t["ctr_pct"]))]
+    ref_text = _ref_text(findings)
     parts = [f"<!doctype html><html lang='ru'><head><meta charset='utf-8'>"
              f"<title>Аудит VK Рекламы {escape(title)}</title><style>{CSS}</style></head><body>",
              f"<h1>Аудит VK Рекламы {escape(title)}</h1>",
              f"<p class='muted'>Период {ds['period']['from']} — {ds['period']['to']} · путь {ds['coverage']['path']}"
-             f" · опорный CPA: {fmt_rub(ref)} ({ref_note})</p>",
+             f" · {escape(ref_text)}</p>",
              f"<div class='alert'>{escape(zero_spend_text(ds))}</div>" if ds.get("zero_spend") else "",
              f"<p class='warn'>{CHANGED_AFTER_PERIOD}</p>" if ds.get("changed_after_period") else "",
              "<div class='tiles'>" + "".join(f"<div class='tile'>{k}<b>{v}</b></div>" for k, v in tiles) + "</div>",
              _conversion_source_html(t),
+             (f"<p class='muted'>Конверсии по целям: {escape(' · '.join(f'{k} — {_num(v)}' for k, v in by_obj.items()))}"
+              "</p>" if len(by_obj) > 1 else ""),
              _metrika_total_html(ds.get("metrika_total")),
              _checklist_html(findings.get("checklist")),
              _ord_status_html(ds, th),

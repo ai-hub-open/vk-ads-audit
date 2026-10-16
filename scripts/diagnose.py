@@ -142,28 +142,59 @@ def _early(ds, g, th) -> bool:
     return _run_days(ds, g) < th["min_run_days"]
 
 
+def _banner_old_enough(b, th) -> bool:
+    if b.get("run_days") is not None:
+        return b["run_days"] >= th["min_run_days"]
+    return b.get("age_days") is None or b["age_days"] >= th["min_run_days"]
+
+
 def _perf_entities(ds, th) -> list:
-    """Объявления (если собраны и старше 7 дней) и группы (если по ним нет объявлений и работают 7+ дней)."""
+    """Объявления (если собраны и показывались 7+ дней периода) и группы (если по ним нет объявлений и работают
+    7+ дней). Ревью: объявление судим по дням показов в периоде (run_days), а не по дате создания; старый dataset
+    без run_days — по возрасту."""
     live = {g["id"]: g for g in _measured(ds)}
     covered = _banner_groups(ds)
     banners = [b for b in ds["banners"] if b["stats"] and b["status"] != "deleted" and b["group_id"] in live
                and b["group_id"] in covered]
     banner_level = {b["group_id"] for b in banners}
-    out = [("banner", b, b["stats"]) for b in banners
-           if b.get("age_days") is None or b["age_days"] >= th["min_run_days"]]
+    out = [("banner", b, b["stats"]) for b in banners if _banner_old_enough(b, th)]
     out += [("group", g, g["stats"]) for g in live.values()
             if g["id"] not in banner_level and not _early(ds, g, th)]
     return out
 
 
-def reference_cpa(ds, th):
+_ALL = object()
+
+
+def reference_cpa(ds, th, objective=_ALL):
+    """Опорный CPA: целевой клиента или медиана CPA групп с ≥ min_conversions_for_cpa конверсиями. Ревью: группы моложе
+    7 дней в медиану не входят (решение 5), медиана — внутри одной цели (objective): CPA сайта и лид-форм не смешиваем."""
     if ds.get("target_cpa"):
         return float(ds["target_cpa"]), "target"
     cpas = [g["stats"]["cpa"] for g in _measured(ds)
-            if g["stats"]["cpa"] is not None and g["stats"]["conversions"] >= th["min_conversions_for_cpa"]]
+            if (objective is _ALL or g.get("objective") == objective) and not _early(ds, g, th)
+            and g["stats"]["cpa"] is not None and g["stats"]["conversions"] >= th["min_conversions_for_cpa"]]
     if cpas:
         return round(float(statistics.median(cpas)), 2), "median"
     return None, "none"
+
+
+def reference_by_objective(ds, th) -> dict:
+    """{цель: опорный CPA} для целей живых групп, где он есть."""
+    out = {}
+    for obj in sorted({g.get("objective") for g in _measured(ds)}, key=str):
+        ref, _ = reference_cpa(ds, th, obj)
+        if ref is not None:
+            out[obj] = ref
+    return out
+
+
+def _ref(ctx, g):
+    """(опорный CPA, источник) для цели группы."""
+    if ctx["ref_source"] == "target":
+        return ctx["ref_cpa"], "target"
+    ref = ctx["ref_by_obj"].get(g.get("objective"))
+    return (ref, "median") if ref is not None else (None, "none")
 
 
 def _banners_of(ds, g):
@@ -307,12 +338,12 @@ def low_budget(ds, th, ctx):
             out.append(finding("low_budget", "orange", "group", g, "Дневной бюджет ниже минимума VK",
                                {"budget_day_rub": b, "minimum_rub": th["min_daily_budget_rub"]},
                                f"Поднять дневной бюджет до {th['min_daily_budget_rub']} ₽ и выше"))
-        elif _is_auto(g, th) and ctx["ref_cpa"] is not None and \
-                b < ctx["ref_cpa"] * th["learning_budget_cpa_multiplier"]:
-            need = ctx["ref_cpa"] * th["learning_budget_cpa_multiplier"]
+        elif _is_auto(g, th) and _ref(ctx, g)[0] is not None and \
+                b < _ref(ctx, g)[0] * th["learning_budget_cpa_multiplier"]:
+            need = _ref(ctx, g)[0] * th["learning_budget_cpa_multiplier"]
             out.append(finding("low_budget", "orange", "group", g,
                                "Бюджета не хватает на обучение автостратегии",
-                               {"budget_day_rub": b, "needed_rub": need, "ref_source": ctx["ref_source"]},
+                               {"budget_day_rub": b, "needed_rub": need, "ref_source": _ref(ctx, g)[1]},
                                f"Дневной бюджет не ниже {need:.0f} ₽ (≥ {th['learning_budget_cpa_multiplier']} × CPA)"))
         elif b < th["recommended_daily_budget_rub"]:
             out.append(finding("low_budget", "white", "group", g, "Дневной бюджет на нижней границе",
@@ -920,16 +951,18 @@ def moderation_stuck(ds, th, ctx):
 
 @rule
 def spend_no_conversions(ds, th, ctx):
-    ref = ctx["ref_cpa"]
-    limit = ref * th["no_conv_spend_cpa_multiplier"] if ref else th["no_conv_min_spend_rub"]
     out = []
     for g in _measured(ds):
+        if _early(ds, g, th):   # решение 5: результат группы моложе 7 дней не судим
+            continue
+        ref, source = _ref(ctx, g)
+        limit = ref * th["no_conv_spend_cpa_multiplier"] if ref else th["no_conv_min_spend_rub"]
         s = g["stats"]
         _seen(ctx, "spend_no_conversions")
         if s["conversions"] == 0 and s["spent"] >= limit:
             out.append(finding("spend_no_conversions", "red", "group", g, "Расход без конверсий",
                                {"spent": s["spent"], "clicks": s["clicks"], "limit_rub": round(limit, 2),
-                                "ref_source": ctx["ref_source"]},
+                                "ref_source": source},
                                "Остановить или пересобрать: аудитория, креатив, посадочная, событие пикселя",
                                effect_rub=s["spent"], conf=confidence(s["clicks"], th)))
     return out
@@ -937,18 +970,18 @@ def spend_no_conversions(ds, th, ctx):
 
 @rule
 def cpa_above_target(ds, th, ctx):
-    ref = ctx["ref_cpa"]
-    if not ref:
-        return []
     out = []
     for g in _measured(ds):
+        ref, source = _ref(ctx, g)
+        if not ref or _early(ds, g, th):   # опорного CPA для цели группы нет или группа моложе 7 дней
+            continue
         s = g["stats"]
         if s["conversions"] >= th["min_conversions_for_cpa"]:
             _seen(ctx, "cpa_above_target")
         if s["conversions"] >= th["min_conversions_for_cpa"] and s["cpa"] > ref * th["cpa_over_ratio"]:
             over = s["spent"] - s["conversions"] * ref
             out.append(finding("cpa_above_target", "red", "group", g, "CPA заметно выше опорного",
-                               {"cpa": s["cpa"], "ref_cpa": ref, "ref_source": ctx["ref_source"],
+                               {"cpa": s["cpa"], "ref_cpa": ref, "ref_source": source,
                                 "conversions": s["conversions"]},
                                "Сузить или сменить аудиторию, заменить слабые креативы, снизить ставку",
                                effect_rub=over, conf=confidence(s["clicks"], th)))
@@ -1090,13 +1123,13 @@ def spend_concentration(ds, th, ctx):
 
 @rule
 def scale_leader(ds, th, ctx):
-    ref = ctx["ref_cpa"]
-    if not ref:
-        return []
     out = []
     for g in _measured(ds):
         s, b = g["stats"], g["budget_day_rub"]
-        if not _active(g, th) or not b or not g["daily"] or s["conversions"] < th["min_conversions_for_cpa"]:
+        ref = _ref(ctx, g)[0]
+        if not ref or not _active(g, th) or not b or not g["daily"] or s["conversions"] < th["min_conversions_for_cpa"]:
+            continue
+        if _early(ds, g, th):   # решение 5: лидера моложе 7 дней не масштабируем
             continue
         spend_days = [r["spent"] for r in g["daily"] if r["spent"] > 0]
         if not spend_days:
@@ -1127,7 +1160,8 @@ def scale_leader(ds, th, ctx):
 # ---------- метрика ----------
 
 def _with_metrika(ds, th):
-    return [g for g in _measured(ds) if _active(g, th) and g.get("metrika")]
+    # решение 5: группы моложе 7 дней правила Метрики не судят
+    return [g for g in _measured(ds) if _active(g, th) and g.get("metrika") and not _early(ds, g, th)]
 
 
 @rule
@@ -1289,14 +1323,36 @@ def funnel_potential_findings(ds: dict, th: dict, answers: dict | None) -> list:
 # ---------- запуск ----------
 
 def diagnose(ds: dict, th: dict, answers: dict | None = None) -> dict:
-    ref, source = reference_cpa(ds, th)
-    ctx = {"ref_cpa": ref, "ref_source": source, "evaluated": defaultdict(int)}
+    by_obj = {} if ds.get("target_cpa") else reference_by_objective(ds, th)
+    if ds.get("target_cpa"):
+        ref, source = reference_cpa(ds, th)
+    elif len(by_obj) == 1:
+        ref, source = next(iter(by_obj.values())), "median"
+    else:   # нет опорного или несколько целей — опорный у каждой цели свой (ref_by_objective)
+        ref, source = None, "median" if by_obj else "none"
+    ctx = {"ref_cpa": ref, "ref_source": source, "ref_by_obj": by_obj, "evaluated": defaultdict(int)}
     out = []
     for fn in RULES:
         out.extend(fn(ds, th, ctx))
     out.extend(funnel_potential_findings(ds, th, answers))
+    _mark_paused(ds, th, out)
     out.sort(key=lambda f: (LEVEL_ORDER[f["level"]], -f["effect_rub"]))
-    return {"ref_cpa": ref, "ref_source": source, "findings": out, "evaluated": dict(ctx["evaluated"])}
+    return {"ref_cpa": ref, "ref_source": source, "ref_by_objective": by_obj, "findings": out,
+            "evaluated": dict(ctx["evaluated"])}
+
+
+def _mark_paused(ds, th, findings):
+    """Ревью: находка по живой группе на паузе (или в остановленной кампании) говорит об этом в действии —
+    советовать «сузить аудиторию» выключенной группе без оговорки нельзя."""
+    groups = {g["id"]: g for g in _live(ds)}
+    for f in findings:
+        g = groups.get(f["entity"]["id"]) if f["entity"]["type"] == "group" else None
+        if g is None or _active(g, th):
+            continue
+        prefix = ("Группа сейчас на паузе (кампания остановлена)." if g.get("status") in th["active_statuses"]
+                  else "Группа сейчас на паузе.")
+        f["action"] = f"{prefix} {f['action']}"
+        f["paused"] = True
 
 
 def main(argv=None) -> int:

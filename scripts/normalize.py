@@ -37,7 +37,7 @@ try:
                                   UPDATED_KEYS, plural,
                                   SEGMENT_RELATION_KEYS, banner_cta, banner_text, content_features, first_known, is_lal,
                                   is_active_group, is_keyword_segment, is_live_group, layer_info, observed_keys,
-                                  parse_dt, targeting_features, url_strings, users_list_ids)
+                                  parse_dt, segment_kind, targeting_features, url_strings, users_list_ids)
     from scripts.collect import total_spend
     from scripts.raw_store import items_of, mark_recovered, read_calls
 except ImportError:  # запуск напрямую
@@ -47,7 +47,7 @@ except ImportError:  # запуск напрямую
                           UPDATED_KEYS, plural,
                           SEGMENT_RELATION_KEYS, banner_cta, banner_text, content_features, first_known, is_lal,
                           is_active_group, is_keyword_segment, is_live_group, layer_info, observed_keys,
-                          parse_dt, targeting_features, url_strings, users_list_ids)
+                          parse_dt, segment_kind, targeting_features, url_strings, users_list_ids)
     from collect import total_spend
     from raw_store import items_of, mark_recovered, read_calls
 
@@ -464,6 +464,9 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
             # сегменты ключевых фраз в таргетинге: фразы есть, но их параметры (минус-фразы, период) MCP не отдаёт
             "keyword_segment_ids": [i for i in target_ids if i in segments_by_id
                                     and is_keyword_segment(segments_by_id[i])],
+            # тип сегмента по связям не определён (нет relations или тип незнакомый): может быть и сегментом фраз
+            "untyped_segment_ids": [i for i in target_ids if i in segments_by_id
+                                    and segment_kind(segments_by_id[i]) is None],
             "max_price_rub": _price(g.get("max_price")),
             "auto_utm": _auto_utm(g, observed_g) if (g["id"] not in utm_blind or isinstance(g.get("utm"), str))
             else None,
@@ -476,9 +479,12 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
 
     banner_out = []
     for b in banners:
+        run_days = None   # дней с показами в периоде; None — дневной статистики объявления нет
         if b["id"] in bdaily:
             obj = objective_of.get(b["_group"])
-            bstats = aggregate([stats_from(r, obj) for r in bdaily[b["id"]].get("rows") or []])
+            brows = [stats_from(r, obj) for r in bdaily[b["id"]].get("rows") or []]
+            bstats = aggregate(brows)
+            run_days = sum(1 for r in brows if r["shows"] > 0)
         elif bdaily_calls == 0 and b["id"] in bsummary:  # только старый raw/ без дней
             bstats = stats_from(bsummary[b["id"]].get("total"), objective_of.get(b["_group"]))
         else:
@@ -500,7 +506,7 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
             # "status"} — храним как есть (подписи — features.ord_status_label), а не repr словаря
             "ord_status": _ord_status(None if b["id"] in ord_status_blind
                                       else first_known(b, ORD_STATUS_KEYS, observed_b)),
-            "stats": bstats,
+            "stats": bstats, "run_days": run_days,
         })
 
     live_groups = [g for g in groups if _is_live(g)]

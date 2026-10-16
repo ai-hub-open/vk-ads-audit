@@ -618,3 +618,120 @@ def test_collect_asks_segments_with_relations_and_falls_back(tmp_path):
     assert [("fields" in a) for a in seg] == [True, False]
     calls = [c for c in log["calls"] if c["tool"] == "vk_ads_remarketing_segments_list"]
     assert calls[0]["superseded"] is True and calls[1]["ok"] is True
+
+
+# ==== Независимое ревью ветки fix/live-run-3 ====
+
+def _young(gid, days, day=None, **kw):
+    """Группа, откручивавшая только последние `days` дней периода."""
+    return make_group(gid, daily=daily(days, start=31 - days, **(day or {})), **kw)
+
+
+# ---- R1. Правило 7 дней в правилах результата ----
+
+def test_young_group_gets_no_f6_findings_and_is_not_in_reference_cpa():
+    from scripts.diagnose import reference_cpa
+    young = _young(1, 1, day={"spent": 900.0, "shows": 14000, "clicks": 700, "conv": 0},
+                   stats=stats(900, 14000, 700, 0))
+    young2 = _young(2, 3, day={"spent": 3000.0, "shows": 30000, "clicks": 300, "conv": 15},
+                    stats=stats(9000, 90000, 900, 45))           # CPA 200 при опорном 100
+    olds = [make_group(10 + i, stats=stats(3000, 30000, 300, 30), daily=daily(30, 100.0, 1000, 10, 1))
+            for i in range(3)]
+    ds = make_ds([young, young2] + olds)
+    assert reference_cpa(ds, TH) == (100.0, "median")
+    assert found(ds, "spend_no_conversions") == [] and found(ds, "cpa_above_target") == []
+    old_bad = make_group(5, stats=stats(900, 14000, 700, 0), daily=daily(30, 30.0, 466, 23, 0))
+    assert [f["entity"]["id"] for f in found(make_ds([old_bad] + olds), "spend_no_conversions")] == [5]
+
+
+def test_young_group_is_not_a_leader():
+    lead = _young(1, 3, day={"spent": 1000.0, "shows": 10000, "clicks": 100, "conv": 10},
+                  stats=stats(3000, 30000, 300, 30), budget_day_rub=1000.0)
+    ds = make_ds([lead, _cheap_ref()])
+    assert found(ds, "scale_leader") == [] and found(ds, "leader_budget_changed") == []
+    lead["changed_after_period"], lead["budget_day_rub"] = True, 500.0
+    assert found(make_ds([lead, _cheap_ref()]), "leader_budget_changed") == []
+
+
+def test_young_group_gets_no_metrika_findings():
+    m = {"visits": 500, "bounce_rate": 0.9, "goal_reaches": 5}
+    cov = {"path": "B", "banners": True, "summary": True, "stats": True, "pixels": True, "metrika": True,
+           "metrika_utm": True}
+    young = _young(1, 2, stats=stats(1000, 10000, 1000, 0), metrika=dict(m))
+    ds = make_ds([young], coverage=dict(cov))
+    for rule in ("high_bounce", "click_loss", "goals_without_vk_conversions"):
+        assert found(ds, rule) == [], rule
+    old = make_group(1, stats=stats(1000, 10000, 1000, 0), metrika=dict(m))
+    ds = make_ds([old], coverage=dict(cov))
+    assert all(found(ds, r) for r in ("high_bounce", "click_loss", "goals_without_vk_conversions"))
+
+
+def test_banner_admitted_to_perf_by_days_with_shows_not_creation(tmp_path):
+    raw = tmp_path / "raw"
+    cabinet(raw, [_active(1)], daily={1: day_rows(30, shows=1000)}, banners_by_group={1: [
+        {"id": 11, "status": "active", "created": "2025-01-01 00:00:00"},
+        {"id": 12, "status": "active", "created": "2025-01-01 00:00:00"}]},
+        banner_daily={11: day_rows(3, shows=300, clicks=1), 12: day_rows(30, shows=500, clicks=1)})
+    ds = build_dataset(raw, *D)
+    by = {b["id"]: b for b in ds["banners"]}
+    assert by[11]["run_days"] == 3 and by[12]["run_days"] == 30
+    from scripts.diagnose import _perf_entities
+    assert [e["id"] for kind, e, _ in _perf_entities(ds, TH) if kind == "banner"] == [12]
+
+
+def test_f5_rule_doc_lists_rules_under_seven_days():
+    line = _ref("diagnostic-rules.md").split("`F5` окно решения")[1].split("\n")[0]
+    for name in ("spend_no_conversions", "cpa_above_target", "scale_leader", "leader_budget_changed", "high_bounce",
+                 "click_loss", "goals_without_vk_conversions", "опорн"):
+        assert name in line, name
+
+
+# ---- R3. Фолбэк на goals — шапка честно говорит, откуда конверсии ----
+
+def test_header_on_goals_fallback():
+    from scripts.render_report import render
+    ds = make_ds([make_group(1)])
+    ds["totals"] = {**stats(100, 1000, 10, 3), "goals_all": 3, "conversions_from_goals": True}
+    head = render(ds, {**res(ds), "checklist": checklist(ds)}).split("Чек-лист")[0]
+    assert "Конверсии — все цели пикселя: «Результат» VK не пришёл, могут быть завышены" in head
+    assert "результат по цели оптимизации" not in head and "справочно" not in head
+
+
+# ---- R7. Опорный CPA и F6 — внутри одной цели ----
+
+def test_reference_cpa_per_objective():
+    site = [make_group(i, stats=stats(1000, 10000, 100, 10), daily=daily()) for i in (1, 2, 3)]       # CPA 100
+    leads = [make_group(i, objective="leadads", stats=stats(5000, 10000, 100, 10), daily=daily())
+             for i in (4, 5, 6)]                                                                     # CPA 500
+    ds = make_ds(site + leads)
+    r = res(ds)
+    assert r["ref_by_objective"] == {"site_conversions": 100.0, "leadads": 500.0}
+    assert found(ds, "cpa_above_target") == []                   # лиды не «дороже» сайта: цели разные
+    one = res(make_ds(site))
+    assert one["ref_cpa"] == 100.0 and one["ref_by_objective"] == {"site_conversions": 100.0}
+
+
+def test_conversions_tile_says_sum_of_different_results():
+    from scripts.render_report import render
+    ds = make_ds([make_group(1, stats=stats(100, 1000, 10, 2)),
+                  make_group(2, objective="leadads", stats=stats(100, 1000, 10, 3))])
+    html = render(ds, {**res(ds), "checklist": checklist(ds)})
+    assert "сумма результатов разных целей" in html
+    assert "конверсии на сайте — 2" in html and "лид-формы — 3" in html
+    single = make_ds([make_group(1, stats=stats(100, 1000, 10, 2))])
+    assert "сумма результатов разных целей" not in render(single, {**res(single), "checklist": checklist(single)})
+
+
+# ---- R13. Находка по группе на паузе — так и сказано ----
+
+def test_finding_on_paused_group_says_paused():
+    olds = [make_group(10 + i, stats=stats(3000, 30000, 300, 30), daily=daily(30, 100.0, 1000, 10, 1))
+            for i in range(3)]
+    bad = make_group(1, status="blocked", stats=stats(9000, 90000, 900, 30), daily=daily(30, 300.0, 3000, 30, 1))
+    stopped = make_group(2, issues=["AD_PLAN_STOPPED"], stats=stats(9000, 90000, 900, 30),
+                         daily=daily(30, 300.0, 3000, 30, 1))
+    fs = {f["entity"]["id"]: f for f in found(make_ds([bad, stopped] + olds), "cpa_above_target")}
+    assert fs[1]["action"].startswith("Группа сейчас на паузе.")
+    assert fs[2]["action"].startswith("Группа сейчас на паузе (кампания остановлена).")
+    worse = make_group(3, stats=stats(9000, 90000, 900, 30), daily=daily(30, 300.0, 3000, 30, 1))
+    assert not found(make_ds([worse] + olds), "cpa_above_target")[0]["action"].startswith("Группа сейчас")
