@@ -132,9 +132,9 @@ ENTITY_LABELS = {"group": "группа", "banner": "объявление", "pla
 
 
 def _ev_text(v) -> str:
-    """Значение без сырого repr: списки через запятую, словари «ключ: значение»."""
+    """Значение без сырого repr: списки через запятую (числа в списках — id, без разрядов), словари «ключ: значение»."""
     if isinstance(v, list):
-        return ", ".join(_ev_text(x) for x in v)
+        return ", ".join(str(x) if isinstance(x, int) and not isinstance(x, bool) else _ev_text(x) for x in v)
     if isinstance(v, dict):
         return "; ".join(f"{k}: {_ev_text(x)}" for k, x in v.items() if x not in (None, "", []))
     if isinstance(v, (bool, int, float)) or v is None:

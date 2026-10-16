@@ -536,6 +536,12 @@ def test_finding_evidence_rendered_with_russian_labels():
     assert "опорный CPA" in html and "закончились деньги на балансе" in html
 
 
+def test_id_lists_in_evidence_have_no_digit_grouping():
+    from scripts.render_report import evidence_value
+    assert evidence_value("groups", [79001234, 79005678]) == "79001234, 79005678"
+    assert evidence_value("spent", 1234567.0) == "1 234 567 ₽" and evidence_value("shows", 12000) == "12 000"
+
+
 def test_every_evidence_key_of_eval_cabinets_has_label(tmp_path):
     from evals.run_evals import _dataset
     from evals.fixtures import CABINETS
