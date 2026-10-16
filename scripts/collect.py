@@ -44,13 +44,14 @@ except ImportError:  # запуск напрямую
 
 PLAN_FIELDS = "id,name,status,objective,budget_limit,budget_limit_day,date_start,date_end,created,updated"
 # Базовые списки и расширенные поля подтверждены живым прогоном 2026-10-16 (auto_utm, erid, ord_token, ord_erid
-# сервер отвергает: 400 unknown_resource_fields; маркировка — ord_marker, UTM группы — enable_utm и utm).
+# сервер отвергает: 400 unknown_resource_fields; маркировка — ord_marker, статус ОРД — or_status, UTM группы — enable_utm
+# и utm).
 GROUP_FIELDS_BASE = ("id,name,status,objective,package_id,ad_plan_id,budget_limit,budget_limit_day,targetings,"
                      "issues,created,updated,date_start,date_end,delivery,autobidding_mode,max_price,priced_goal")
 BANNER_FIELDS_BASE = ("id,name,campaign_id,status,moderation_status,moderation_reasons,issues,delivery,"
                       "textblocks,urls,content,created,updated,user_can_request_remoderation")
 GROUP_FIELDS = GROUP_FIELDS_BASE + ",enable_utm,utm"
-BANNER_FIELDS = BANNER_FIELDS_BASE + ",call_to_action,ord_marker"
+BANNER_FIELDS = BANNER_FIELDS_BASE + ",call_to_action,ord_marker,or_status"
 STATS_CHUNK = 50
 HISTORY_DAYS = 366          # глубина дневной статистики VK: MCP отказывает сам, VK — 400 WRONG_DATE (минимальная дата в тексте)
 _MIN_DATE_RES = (re.compile(r"minimal allowed date is '(\d{4})-(\d{1,2})-(\d{1,2})'", re.I),   # VK: WRONG_DATE

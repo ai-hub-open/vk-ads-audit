@@ -11,17 +11,18 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections import Counter
 from html import escape
 
 try:
     from scripts._console import setup_console
     from scripts._workspace import resolve_workspace
-    from scripts.diagnose import bidding_label, load_thresholds, utm_unconfirmed_groups, utm_unconfirmed_text
+    from scripts.diagnose import _banners, bidding_label, load_thresholds, utm_unconfirmed_groups, utm_unconfirmed_text
     from scripts.raw_store import mark_recovered
 except ImportError:  # запуск напрямую
     from _console import setup_console
     from _workspace import resolve_workspace
-    from diagnose import bidding_label, load_thresholds, utm_unconfirmed_groups, utm_unconfirmed_text
+    from diagnose import _banners, bidding_label, load_thresholds, utm_unconfirmed_groups, utm_unconfirmed_text
     from raw_store import mark_recovered
 
 LEVELS = [("red", "🔴 Срезать слив"), ("orange", "🟠 Починить"), ("green", "🟢 Масштабировать"),
@@ -153,6 +154,18 @@ def _checklist_html(cl) -> str:
     return "".join(parts)
 
 
+def _ord_status_html(ds, th) -> str:
+    """Справочно: статусы ОРД (or_status) активных объявлений. Смысл значений не подтверждён — показываем как есть,
+    на A2 и находки не влияет."""
+    counts = Counter(b["ord_status"] for b in _banners(ds)
+                     if b.get("ord_status") and b["status"] in th["active_statuses"])
+    if not counts:
+        return ""
+    parts = " · ".join(f"{escape(k)} — {v}" for k, v in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
+    return ("<p class='muted'>Справочно: статус ОРД активных объявлений (поле VK or_status; значения не расшифрованы, "
+            f"на проверку A2 не влияют): {parts}</p>")
+
+
 def _questions_html(qs) -> str:
     if not qs:
         return ""
@@ -178,6 +191,7 @@ def render(ds: dict, findings: dict, collect_log=None, title: str = "", th=None)
              "<div class='tiles'>" + "".join(f"<div class='tile'>{k}<b>{v}</b></div>" for k, v in tiles) + "</div>",
              _metrika_total_html(ds.get("metrika_total")),
              _checklist_html(findings.get("checklist")),
+             _ord_status_html(ds, th),
              "<h2>Находки</h2>"]
     if not findings["findings"]:
         parts.append("<p>Существенных проблем не найдено.</p>")

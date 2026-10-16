@@ -25,7 +25,8 @@ from pathlib import Path
 try:
     from scripts._console import setup_console
     from scripts._workspace import resolve_workspace
-    from scripts.features import (AUTO_UTM_KEYS, ERID_KEYS, EXCLUDE_KEYS, PLAN_BUDGET_KEYS, SIZE_KEYS, UPDATED_KEYS,
+    from scripts.features import (AUTO_UTM_KEYS, ERID_KEYS, EXCLUDE_KEYS, ORD_STATUS_KEYS, PLAN_BUDGET_KEYS, SIZE_KEYS,
+                                  UPDATED_KEYS,
                                   SEGMENT_RELATION_KEYS, banner_text, content_features, first_known, is_lal,
                                   is_live_group, layer_of, observed_keys, parse_dt, targeting_features,
                                   url_strings, users_list_ids)
@@ -33,7 +34,8 @@ try:
 except ImportError:  # запуск напрямую
     from _console import setup_console
     from _workspace import resolve_workspace
-    from features import (AUTO_UTM_KEYS, ERID_KEYS, EXCLUDE_KEYS, PLAN_BUDGET_KEYS, SIZE_KEYS, UPDATED_KEYS,
+    from features import (AUTO_UTM_KEYS, ERID_KEYS, EXCLUDE_KEYS, ORD_STATUS_KEYS, PLAN_BUDGET_KEYS, SIZE_KEYS,
+                          UPDATED_KEYS,
                           SEGMENT_RELATION_KEYS, banner_text, content_features, first_known, is_lal,
                           is_live_group, layer_of, observed_keys, parse_dt, targeting_features,
                           url_strings, users_list_ids)
@@ -328,6 +330,7 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
     segments_by_id = {s.get("id"): s for s in seg_items}
     observed_b = observed_keys(banners)
     erid_blind = _blind_ids(raw_dir, "vk_ads_banners_list", ERID_KEYS)
+    ord_status_blind = _blind_ids(raw_dir, "vk_ads_banners_list", ORD_STATUS_KEYS)
     utm_blind = _blind_ids(raw_dir, "vk_ads_campaigns_list", AUTO_UTM_KEYS)
 
     objective_of: dict = {}
@@ -396,6 +399,10 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
             "age_days": (d_to - parse_dt(b["created"]).date()).days if parse_dt(b.get("created")) else None,
             "erid": (None if b["id"] in erid_blind or not any(k in observed_b for k in ERID_KEYS)
                      else str(first_known(b, ERID_KEYS, observed_b) or "")),
+            # статус ОРД — только справочно: смысл значений or_status не подтверждён, в проверку A2 не идёт
+            "ord_status": (None if b["id"] in ord_status_blind
+                           or first_known(b, ORD_STATUS_KEYS, observed_b) in (None, "")
+                           else str(first_known(b, ORD_STATUS_KEYS, observed_b))),
             "stats": bstats,
         })
 

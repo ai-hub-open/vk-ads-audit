@@ -19,7 +19,7 @@
 |---|---|---|---|
 | 1 | `vk_ads_ad_plans_list` | `fields=id,name,status,objective,budget_limit,budget_limit_day,date_start,date_end,created,updated`, `limit=250`, `offset` | `vk_ads_ad_plans_list__NNN.json` |
 | 2 | `vk_ads_campaigns_list` | `fields=id,name,status,objective,package_id,ad_plan_id,budget_limit,budget_limit_day,targetings,issues,created,updated,date_start,date_end,delivery,autobidding_mode,max_price,priced_goal,enable_utm,utm` | `vk_ads_campaigns_list__NNN.json` |
-| 3 | `vk_ads_banners_list` | `campaign_id=<группа>`, `fields=id,name,campaign_id,status,moderation_status,moderation_reasons,issues,delivery,textblocks,urls,content,created,updated,user_can_request_remoderation,call_to_action,ord_marker` | по файлу на группу |
+| 3 | `vk_ads_banners_list` | `campaign_id=<группа>`, `fields=id,name,campaign_id,status,moderation_status,moderation_reasons,issues,delivery,textblocks,urls,content,created,updated,user_can_request_remoderation,call_to_action,ord_marker,or_status` | по файлу на группу |
 | 4 | `vk_ads_remarketing_segments_list`, `vk_ads_users_lists_list`, `vk_ads_remarketing_pixels_list` | — | по файлу |
 | 5 | `vk_ads_statistics_day` | `entity=campaigns`, `ids` ≤ 50 через запятую (все группы, кроме удалённых), `date_from`, `date_to`, `metrics=base` | по файлу на пачку |
 | 6 | `vk_ads_statistics_day` | `entity=banners`, `ids` объявлений (≤ 50 в пачке), `date_from`, `date_to`, `metrics=base` | по файлу на пачку |
@@ -44,7 +44,7 @@
 Без `fields` списки отдают только `id`, `name`, `package_id`. Неизвестное имя в `fields` сервер отвергает ошибкой
 `400 unknown_resource_fields` (живой прогон 16.10.2026). Поэтому путь B (`scripts/collect.py`) просит расширенный
 список (`GROUP_FIELDS`, `BANNER_FIELDS` — к `GROUP_FIELDS_BASE`, `BANNER_FIELDS_BASE` добавлены `enable_utm`, `utm`,
-`call_to_action`, `ord_marker`) и при ошибке ответа повторяет вызов один раз с базовым списком; оба вызова остаются в
+`call_to_action`, `ord_marker`, `or_status`) и при ошибке ответа повторяет вызов один раз с базовым списком; оба вызова остаются в
 `collect_log.json`. На пути A — те же расширенные строки; отказал сервер — повтори с базовыми.
 
 `vk_ads_packages_list` (обновление сервера 2026-10-14) по умолчанию отдаёт только пакеты, на которых можно
@@ -84,6 +84,8 @@
   "total": {"base": {...}}}`; предполётка читает `items[].total.base.spent` (строка).
 - Поле группы `auto_utm` → `400 unknown_resource_fields`; приходят `enable_utm` (bool) и `utm` (у удалённой группы null).
 - Поля объявления `erid`, `ord_token`, `ord_erid` → 400; маркировка ОРД лежит в `ord_marker` (строка, например `2VtzquiRr5b`).
+  `or_status` (статус ОРД) — тоже допустимое поле; что значат его значения, не подтверждено: скрипты его сохраняют
+  (`ord_status` в `dataset.json`) и показывают в отчёте справочно, в проверку A2 он не идёт.
 - `vk_ads_users_lists_list` → HTTP 429 с `limits: {"1": 0}`: у подключения нет прав на базы клиентов, повтор бесполезен.
 - Сегменты приходят только с `id, name, pass_condition, flags, created, updated` — без `size` и без `relations` (дефект MCP):
   размер LAL-сегментов и связь база → сегмент недоступны.
@@ -129,6 +131,7 @@
 | корректировки по устройствам | `DEVICE_ADJ_KEYS` | `device_bid_adjustments`, `mobile_bid_adjustments` | `targetings` группы |
 | корректировки по полу и возрасту | `DEMO_ADJ_KEYS` | `demography_bid_adjustments`, `sex_age_bid_adjustments` | `targetings` группы |
 | маркировка ОРД | `ERID_KEYS` | `ord_marker` | объявление (подтверждено) |
+| статус ОРД (справочно) | `ORD_STATUS_KEYS` | `or_status` | объявление (поле подтверждено, смысл значений — нет) |
 | авто-UTM | `AUTO_UTM_KEYS` | `enable_utm` | группа (подтверждено) |
 | бюджет кампании (CBO) | `PLAN_BUDGET_KEYS` | `budget_limit`, `budget_limit_day` | кампания (`ad_plan`) |
 | размер сегмента, базы | `SIZE_KEYS` | `size`, `count`, `entries_count`, `audience_size` | сегмент, пользовательская база |

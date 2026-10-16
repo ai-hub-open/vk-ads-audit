@@ -270,3 +270,52 @@ def test_bidding_docs():
     rules, tools_doc = _ref("diagnostic-rules.md"), _ref("mcp-read-tools.md")
     assert "`second_price_mean`" in rules and "ручная ставка" in rules and "`manual_bidding_modes`" in rules
     assert "second_price_mean" in tools_doc and "значение ручного режима неизвестно" not in tools_doc
+
+
+# ---- 8. or_status (статус ОРД) собираем рядом с ord_marker — справочно, без новых ❌ ----
+
+def test_banner_fields_include_or_status(tmp_path):
+    from scripts.collect import BANNER_FIELDS
+    names = BANNER_FIELDS.split(",")
+    assert "or_status" in names and "ord_marker" in names and not {"erid", "ord_token", "ord_erid"} & set(names)
+    client = FakeClient(groups(1))
+    collect(client, tmp_path / "raw", "2026-09-01", "2026-09-30")
+    assert all("or_status" in a["fields"].split(",") for a in tools(client, "vk_ads_banners_list"))
+
+
+def test_or_status_normalized_as_reference(tmp_path):
+    raw = tmp_path / "raw"
+    cabinet(raw, [_active(1)], banners_by_group={1: [
+        {"id": 11, "status": "active", "ord_marker": "2Vtzqx1", "or_status": "registered"},
+        {"id": 12, "status": "active", "ord_marker": "2Vtzqx2"}]})
+    by = {b["id"]: b for b in build_dataset(raw, *D)["banners"]}
+    assert by[11]["ord_status"] == "registered" and by[12]["ord_status"] is None
+
+
+def test_or_status_unknown_when_key_never_seen(tmp_path):
+    raw = tmp_path / "raw"
+    cabinet(raw, [_active(1)], banners_by_group={1: [{"id": 11, "status": "active", "ord_marker": "X"}]})
+    assert build_dataset(raw, *D)["banners"][0]["ord_status"] is None
+
+
+def test_or_status_does_not_change_a2():
+    bs = [make_banner(11, 1, erid="2Vtzqx1", ord_status="not_registered"),
+          make_banner(12, 1, erid="2Vtzqx2", ord_status="unknown_value")]
+    ds = make_ds([make_group(1)], bs)
+    assert found(ds, "ord_missing") == [] and row(checklist(ds), "A2")["status"] == "pass"
+
+
+def test_or_status_shown_in_report_as_reference():
+    from scripts.render_report import render
+    bs = [make_banner(11, 1, erid="A", ord_status="registered"), make_banner(12, 1, erid="B", ord_status="registered"),
+          make_banner(13, 1, erid="C", ord_status="pending")]
+    ds = make_ds([make_group(1)], bs)
+    html = render(ds, {**res(ds), "checklist": checklist(ds)})
+    assert "Справочно" in html and "or_status" in html and "registered — 2" in html and "pending — 1" in html
+    plain = make_ds([make_group(1)], [make_banner(11, 1, erid="A")])
+    assert "or_status" not in render(plain, {**res(plain), "checklist": checklist(plain)})
+
+
+def test_or_status_documented():
+    tools_doc, rules = _ref("mcp-read-tools.md"), _ref("diagnostic-rules.md")
+    assert "`or_status`" in tools_doc and "ORD_STATUS_KEYS" in tools_doc and "`or_status`" in rules

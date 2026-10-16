@@ -22,6 +22,7 @@ AUTO_PADS_KEYS = ("auto_placements", "pads_auto")                               
 DEVICE_ADJ_KEYS = ("device_bid_adjustments", "mobile_bid_adjustments")               # API?
 DEMO_ADJ_KEYS = ("demography_bid_adjustments", "sex_age_bid_adjustments")            # API?
 ERID_KEYS = ("ord_marker",)                                                          # подтверждено 16.10.2026 (объявление)
+ORD_STATUS_KEYS = ("or_status",)              # подтверждено 16.10.2026 (объявление): смысл значений не расшифрован — справочно
 AUTO_UTM_KEYS = ("enable_utm",)                                                     # подтверждено 16.10.2026 (группа)
 PLAN_BUDGET_KEYS = ("budget_limit", "budget_limit_day")                              # API? (кампания)
 SIZE_KEYS = ("size", "count", "entries_count", "audience_size")                      # API? (сегмент, база)
