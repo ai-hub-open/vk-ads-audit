@@ -36,6 +36,7 @@ def test_healthy_checklist_has_no_fails(tmp_path):
     assert fails == []
     st = {c["id"]: c["status"] for b in cl["blocks"] for c in b["checks"]}
     assert [st[k] for k in ("B1.subscription", "B1.leadform", "B1.senler")] == ["ask"] * 3   # спросить клиента, не ❌
+    assert st["B1.retargeting"] == "pass"   # тёплый слой подтверждён связью сегмента с пикселем
 
 
 def test_healthy_checklist_demonstrates_passes(tmp_path):

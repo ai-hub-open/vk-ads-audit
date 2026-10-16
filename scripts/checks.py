@@ -17,11 +17,11 @@ from __future__ import annotations
 from collections import defaultdict
 
 try:
-    from scripts.diagnose import (ASK_FUNNELS, FUNNEL_LABELS, _active, _banner_groups, _banners, _date, _feat, _layer,
+    from scripts.diagnose import (ASK_FUNNELS, FUNNEL_LABELS, GUESSED_REASON, _active, _guessed, _banner_groups, _banners, _date, _feat, _layer,
                                   _live, _measured, _run_days, funnel_status, plural, utm_unconfirmed_groups,
                                   utm_unconfirmed_reason)
 except ImportError:  # запуск напрямую
-    from diagnose import (ASK_FUNNELS, FUNNEL_LABELS, _active, _banner_groups, _banners, _date, _feat, _layer, _live,
+    from diagnose import (ASK_FUNNELS, FUNNEL_LABELS, GUESSED_REASON, _active, _guessed, _banner_groups, _banners, _date, _feat, _layer, _live,
                           _measured, _run_days, funnel_status, plural, utm_unconfirmed_groups, utm_unconfirmed_reason)
 
 BLOCKS = [("A", "Техническая настройка"), ("B", "Структура аккаунта"), ("C", "Таргетинг"),
@@ -140,13 +140,17 @@ def run_checks(ds: dict, th: dict, findings: list, evaluated: dict | None = None
         if status == "na" and no_active[0]:
             reason = no_active[1]
         add(f"B1.{key}", f"Воронка: {title}", status, reason)
-    by_rules("B2", "Есть тёплый, LAL и холодный слои", ["layer_missing", "no_retargeting"], layer_gate)
+    guessed_gate = ("unknown", GUESSED_REASON)
+    by_rules("B2", "Есть тёплый, LAL и холодный слои", ["layer_missing", "no_retargeting"],
+             _first(layer_gate, guessed_gate if any(_guessed(g) for g in live) else OK))
     spend = sum(g["stats"]["spent"] for g in all_live)
     by_rules("B3", "Доли бюджета по слоям", ["layer_share"],   # правило — по всем живым группам с расходом
              _first(no_live, no_stats, OK if spend else NO_SPEND,   # нет расхода — раньше слоёв
                     OK if any(_layer(g) is not None for g in all_live)
-                    else ("unknown", "слои аудиторий не определены — таргетинги не получены")))
-    by_rules("B4", "1 сегмент = 1 кампания", ["mixed_plan"], layer_gate)
+                    else ("unknown", "слои аудиторий не определены — таргетинги не получены"),
+                    guessed_gate if any(_guessed(g) and g["stats"]["spent"] > 0 for g in measured) else OK))
+    by_rules("B4", "1 сегмент = 1 кампания", ["mixed_plan"],
+             _first(layer_gate, guessed_gate if any(_guessed(g) for g in live) else OK))
     by_rules("B5", "Нет дробления на мелкие группы", ["fragmentation"], no_active)
     plans_known = any(p.get("has_budget") is not None for p in ds["plans"])
     by_rules("B6", "Бюджет на уровне кампании (CBO)", ["no_cbo"],

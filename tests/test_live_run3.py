@@ -195,3 +195,71 @@ def test_report_warns_when_cabinet_changed_after_period():
     assert text in render(ds, {**res(ds), "checklist": checklist(ds)})
     ds = make_ds([make_group(1)])
     assert text not in render(ds, {**res(ds), "checklist": checklist(ds)})
+
+
+# ---- 1.3. Слои по relations сегментов ----
+
+def _seg(sid, *types, name=None):
+    s = {"id": sid, "name": name or f"Сегмент {sid}", "pass_condition": 1, "flags": ["cross_device"],
+         "relations": [{"id": sid * 10 + i, "object_type": t, "object_id": sid * 100 + i} for i, t in enumerate(types)]}
+    if not types:
+        del s["relations"]
+    return s
+
+
+def test_layer_info_by_relation_types():
+    from scripts.features import layer_info
+    segs = {1: _seg(1, "remarketing_counter"), 2: _seg(2, "remarketing_users_list"),
+            3: _seg(3, "remarketing_search_phrases"), 4: _seg(4, "remarketing_search_phrases", "remarketing_counter"),
+            5: _seg(5, name="LAL покупатели 3%"), 6: _seg(6), 7: _seg(7, "something_new")}
+    assert layer_info([1], segs) == {"layer": "warm", "guessed": False, "subtype": None}
+    assert layer_info([2], segs) == {"layer": "warm", "guessed": False, "subtype": None}
+    assert layer_info([3], segs) == {"layer": "cold", "guessed": False, "subtype": "keywords"}
+    assert layer_info([4], segs)["layer"] == "warm"                   # есть хоть один тёплый тип — тёплый
+    assert layer_info([3, 1], segs)["layer"] == "warm"
+    assert layer_info([5, 3], segs)["layer"] == "lal"
+    assert layer_info([6], segs) == {"layer": "warm", "guessed": True, "subtype": None}   # прежняя логика, по догадке
+    assert layer_info([7], segs)["guessed"] is True
+    assert layer_info([], segs) == {"layer": "cold", "guessed": False, "subtype": None}
+    assert layer_info([99], segs) is None                              # сегмент не найден — слой неизвестен
+
+
+def test_normalize_keyword_segment_is_cold(tmp_path):
+    from scripts.raw_store import write_call
+    raw = tmp_path / "raw"
+    t = {"geo": {"regions": [1]}}
+    cabinet(raw, [_active(1, targetings={**t, "segments": [3]}), _active(2, targetings={**t, "segments": [1]}),
+                  _active(3, targetings={**t, "segments": [6]})])
+    write_call(raw, "vk_ads_remarketing_segments_list", {"paginated": True},
+               {"items": [_seg(3, "remarketing_search_phrases"), _seg(1, "remarketing_counter"), _seg(6)]})
+    by = {g["id"]: g for g in build_dataset(raw, *D)["groups"]}
+    assert (by[1]["layer"], by[1]["layer_subtype"], by[1]["layer_guessed"]) == ("cold", "keywords", False)
+    assert (by[2]["layer"], by[2]["layer_guessed"]) == ("warm", False)
+    assert (by[3]["layer"], by[3]["layer_guessed"]) == ("warm", True)
+
+
+def test_retargeting_fails_when_only_keyword_segments():
+    ds = make_ds([make_group(1, layer="cold", layer_subtype="keywords", segment_ids=[3]), make_group(2)])
+    assert row(checklist(ds), "B1.retargeting")["status"] == "fail"
+    assert found(ds, "no_retargeting")
+
+
+def test_retargeting_not_pass_when_warm_only_guessed():
+    ds = make_ds([make_group(1, layer="warm", layer_guessed=True, segment_ids=[6]), make_group(2)])
+    r = row(checklist(ds), "B1.retargeting")
+    assert r["status"] == "unknown" and "relations" in r["reason"]
+    assert found(ds, "no_retargeting") == []
+    ok = make_ds([make_group(1, layer="warm", layer_guessed=False, segment_ids=[1]), make_group(2)])
+    assert row(checklist(ok), "B1.retargeting")["status"] == "pass"
+
+
+def test_layer_share_with_guessed_layers_is_low_confidence_and_b3_unknown():
+    g1 = make_group(1, layer="warm", layer_guessed=True, segment_ids=[6], stats=stats(9000, 90000, 900, 90))
+    g2 = make_group(2, stats=stats(1000, 10000, 100, 10))
+    ds = make_ds([g1, g2])
+    f = found(ds, "layer_share")
+    assert len(f) == 1 and f[0]["confidence"] == "low" and f[0]["tentative"] is True
+    b3 = row(checklist(ds), "B3")
+    assert b3["status"] == "unknown" and "relations" in b3["reason"]
+    sure = make_ds([make_group(1, layer="warm", segment_ids=[1], stats=stats(9000, 90000, 900, 90)), g2])
+    assert row(checklist(sure), "B3")["status"] == "fail" and found(sure, "layer_share")[0]["confidence"] == "high"

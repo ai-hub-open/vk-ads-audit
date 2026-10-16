@@ -27,10 +27,12 @@ AUTO_UTM_KEYS = ("enable_utm",)                                                 
 PLAN_BUDGET_KEYS = ("budget_limit", "budget_limit_day")                              # API? (кампания)
 SIZE_KEYS = ("size", "count", "entries_count", "audience_size")                      # API? (сегмент, база)
 UPDATED_KEYS = ("updated", "last_upload", "uploaded")                                # API? (база)
-SEGMENT_RELATION_KEYS = ("relations",)                                               # API? (сегмент → список связей)
-RELATION_TYPE_KEYS = ("object_type",)                                                # API? (элемент связи)
-RELATION_ID_KEYS = ("object_id",)                                                      # API? (элемент связи)
-USERS_LIST_TYPE_MARKERS = ("users_list", "user_list")                                # API? (тип объекта связи)
+SEGMENT_RELATION_KEYS = ("relations",)        # подтверждено 16.10.2026 (MCP 0.12.0, fields=…,relations,…)
+RELATION_TYPE_KEYS = ("object_type",)         # подтверждено 16.10.2026: relations[{"id","object_type","object_id"}]
+RELATION_ID_KEYS = ("object_id",)             # подтверждено 16.10.2026
+USERS_LIST_TYPE_MARKERS = ("users_list", "user_list")      # подтверждено 16.10.2026: remarketing_users_list (база)
+WARM_RELATION_TYPES = ("remarketing_counter",)              # подтверждено 16.10.2026: пиксель — тёплый слой
+KEYWORD_RELATION_TYPES = ("remarketing_search_phrases",)    # подтверждено 16.10.2026: ключевые фразы — холодный слой
 RATIOS = {"1:1": 1.0, "4:5": 0.8, "16:9": 16 / 9, "9:16": 9 / 16}
 RATIO_TOL = 0.04
 _LAL_RE = re.compile(r"lookalike|look-alike|\blal\b|похож", re.I)
@@ -180,15 +182,62 @@ def is_lal(segment) -> bool:
     return bool(_LAL_RE.search(json.dumps(segment, ensure_ascii=False)))
 
 
-def layer_of(segment_ids, segments_by_id: dict):
-    """cold / warm / lal; None — сегмент не найден в списке сегментов (или список не собран): слой неизвестен."""
-    if not segment_ids:
-        return "cold"
-    if any(sid in segments_by_id and is_lal(segments_by_id[sid]) for sid in segment_ids):
+def relation_types(segment) -> list:
+    """Типы объектов связей сегмента (relations[].object_type) в нижнем регистре; [] — связей нет или не пришли."""
+    out: list = []
+    for rel_key in SEGMENT_RELATION_KEYS:
+        for rel in (segment.get(rel_key) or []) if isinstance(segment, dict) else []:
+            if isinstance(rel, dict):
+                kind = next((rel[k] for k in RELATION_TYPE_KEYS if isinstance(rel.get(k), str)), "")
+                if kind:
+                    out.append(kind.lower())
+    return out
+
+
+def _warm_type(t: str) -> bool:
+    return t in WARM_RELATION_TYPES or any(m in t for m in USERS_LIST_TYPE_MARKERS)
+
+
+def is_keyword_segment(segment) -> bool:
+    """Сегмент ключевых фраз (relation remarketing_search_phrases): фразы хранятся в сегменте."""
+    return any(t in KEYWORD_RELATION_TYPES for t in relation_types(segment))
+
+
+def segment_kind(segment):
+    """lal / warm (пиксель, база) / keywords (ключевые фразы — холодный слой); None — тип по связям не определить
+    (связей нет, как в старых raw/, или тип незнакомый)."""
+    if is_lal(segment):
         return "lal"
+    types = relation_types(segment)
+    if any(_warm_type(t) for t in types):   # несколько связей разных типов: хоть одна тёплая — тёплый
+        return "warm"
+    if types and all(t in KEYWORD_RELATION_TYPES for t in types):
+        return "keywords"
+    return None
+
+
+def layer_info(segment_ids, segments_by_id: dict):
+    """Слой группы по целевым сегментам: {"layer": cold / warm / lal, "guessed", "subtype"}; None — сегмент не найден
+    в списке сегментов (или список не собран). guessed — тип хотя бы одного сегмента по связям не определён и слой
+    взят по прежней логике «не LAL — тёплый» (низкая надёжность). subtype keywords — холодный слой ключевых фраз."""
+    if not segment_ids:
+        return {"layer": "cold", "guessed": False, "subtype": None}
+    if any(sid in segments_by_id and is_lal(segments_by_id[sid]) for sid in segment_ids):
+        return {"layer": "lal", "guessed": False, "subtype": None}
     if any(sid not in segments_by_id for sid in segment_ids):
         return None
-    return "warm"
+    kinds = [segment_kind(segments_by_id[sid]) for sid in segment_ids]
+    if "warm" in kinds:
+        return {"layer": "warm", "guessed": False, "subtype": None}
+    if all(k == "keywords" for k in kinds):
+        return {"layer": "cold", "guessed": False, "subtype": "keywords"}
+    return {"layer": "warm", "guessed": True, "subtype": None}
+
+
+def layer_of(segment_ids, segments_by_id: dict):
+    """cold / warm / lal; None — сегмент не найден в списке сегментов (или список не собран): слой неизвестен."""
+    info = layer_info(segment_ids, segments_by_id)
+    return info["layer"] if info else None
 
 
 def users_list_ids(segment) -> list:

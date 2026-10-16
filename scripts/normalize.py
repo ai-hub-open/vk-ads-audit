@@ -32,8 +32,8 @@ try:
     from scripts.features import (AUTO_UTM_KEYS, ERID_KEYS, EXCLUDE_KEYS, ORD_STATUS_KEYS, PLAN_BUDGET_KEYS, SIZE_KEYS,
                                   UPDATED_KEYS, plural,
                                   SEGMENT_RELATION_KEYS, banner_text, content_features, first_known, is_lal,
-                                  is_active_group, is_live_group, layer_of, observed_keys, parse_dt,
-                                  targeting_features, url_strings, users_list_ids)
+                                  is_active_group, is_keyword_segment, is_live_group, layer_info, observed_keys,
+                                  parse_dt, targeting_features, url_strings, users_list_ids)
     from scripts.collect import total_spend
     from scripts.raw_store import items_of, mark_recovered, read_calls
 except ImportError:  # запуск напрямую
@@ -42,8 +42,8 @@ except ImportError:  # запуск напрямую
     from features import (AUTO_UTM_KEYS, ERID_KEYS, EXCLUDE_KEYS, ORD_STATUS_KEYS, PLAN_BUDGET_KEYS, SIZE_KEYS,
                           UPDATED_KEYS, plural,
                           SEGMENT_RELATION_KEYS, banner_text, content_features, first_known, is_lal,
-                          is_active_group, is_live_group, layer_of, observed_keys, parse_dt,
-                          targeting_features, url_strings, users_list_ids)
+                          is_active_group, is_keyword_segment, is_live_group, layer_info, observed_keys,
+                          parse_dt, targeting_features, url_strings, users_list_ids)
     from collect import total_spend
     from raw_store import items_of, mark_recovered, read_calls
 
@@ -377,6 +377,8 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
     groups = []
     for g in raw_groups:
         obj = g.get("objective")
+        target_ids = _segment_ids(g.get("targetings"))
+        layer = layer_info(target_ids, segments_by_id) if "targetings" in g else None
         objective_of[g["id"]] = obj
         daily = [{"date": r.get("date"), **stats_from(r, obj)}
                  for r in (daily_raw.get(g["id"]) or {}).get("rows") or []]
@@ -405,11 +407,17 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
             # группу или её кампанию правили после конца периода: статус и бюджет — на дату сбора, не на период
             "changed_after_period": _after(g.get("updated"), d_to) or plan_changed.get(g.get("ad_plan_id"), False),
             "targeting_key": targeting_key(g.get("targetings")),
-            "segment_ids": _segment_ids(g.get("targetings")),
+            "segment_ids": target_ids,
             "excluded_segment_ids": _segment_ids(g.get("targetings"), excluded=True),
             "stats": stats, "daily": daily,
             "features": targeting_features(g.get("targetings"), observed_t),
-            "layer": layer_of(_segment_ids(g.get("targetings")), segments_by_id) if "targetings" in g else None,
+            "layer": layer["layer"] if layer else None,
+            # слой по догадке «не LAL — тёплый»: тип сегмента по связям (relations) не определён — низкая надёжность
+            "layer_guessed": bool(layer and layer["guessed"]),
+            "layer_subtype": layer["subtype"] if layer else None,   # keywords — холодный слой ключевых фраз
+            # сегменты ключевых фраз в таргетинге: фразы есть, но их параметры (минус-фразы, период) MCP не отдаёт
+            "keyword_segment_ids": [i for i in target_ids if i in segments_by_id
+                                    and is_keyword_segment(segments_by_id[i])],
             "max_price_rub": _price(g.get("max_price")),
             "auto_utm": _auto_utm(g, observed_g) if (g["id"] not in utm_blind or isinstance(g.get("utm"), str))
             else None,

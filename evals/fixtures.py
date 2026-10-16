@@ -89,7 +89,10 @@ def healthy(raw: Path) -> dict:
     plans = [{"id": 1, "name": "ретарг_сайт_Мск", "budget_limit_day": 3000},
              {"id": 2, "name": "LAL_клиенты_Мск", "budget_limit_day": 3000},
              {"id": 3, "name": "холод_интересы_Мск", "budget_limit_day": 3000}]
-    segs = [{"id": 101, "name": "Посетители сайта 30 дней"}, {"id": 102, "name": "LAL на клиентов 3%", "size": 120},
+    # MCP 0.12.0 отдаёт relations: пиксель (remarketing_counter) — тёплый слой подтверждён, а не «по догадке»
+    segs = [{"id": 101, "name": "Посетители сайта 30 дней",
+             "relations": [{"id": 1, "object_type": "remarketing_counter", "object_id": 77}]},
+            {"id": 102, "name": "LAL на клиентов 3%", "size": 120},
             {"id": 601, "name": "Клиенты — исключение",
              "relations": [{"object_type": "remarketing_users_list", "object_id": 601}]}]
     # исключение клиентов и ретаргета; места размещения — автоматические

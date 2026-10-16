@@ -179,6 +179,14 @@ def _layer(g):
     return g.get("layer")  # None — слой не определён (targetings не получены)
 
 
+def _guessed(g) -> bool:
+    """Слой по догадке: тип сегмента по связям (relations) не определён — «не LAL — тёплый», низкая надёжность."""
+    return bool(g.get("layer_guessed")) and g.get("layer") is not None
+
+
+GUESSED_REASON = "тип сегментов не подтверждён связями (relations) — слой определён по догадке «не LAL — тёплый»"
+
+
 def _active_banners(ds, g, th) -> list:
     return [b for b in _banners_of(ds, g) if b["status"] in th["active_statuses"]]
 
@@ -452,10 +460,14 @@ def layer_missing(ds, th, ctx):
     if not missing:
         return []
     names = {"lal": "похожие (LAL)", "cold": "холодный"}
-    return [finding("layer_missing", "white", "account", ACCOUNT,
-                    "Не хватает слоя аудиторий: " + ", ".join(names[m] for m in missing),
-                    {"missing_layers": missing},
-                    "Добавить слой: LAL на клиентов и лиды или холодный тест на интересах и контексте")]
+    f = finding("layer_missing", "white", "account", ACCOUNT,
+                "Не хватает слоя аудиторий: " + ", ".join(names[m] for m in missing),
+                {"missing_layers": missing},
+                "Добавить слой: LAL на клиентов и лиды или холодный тест на интересах и контексте")
+    if "cold" in missing and any(_guessed(g) for g in live):   # «тёплая» по догадке группа может быть холодной
+        f.update(confidence="low", tentative=True)
+        f["title"] += " (слои части групп определены по догадке)"
+    return [f]
 
 
 @rule
@@ -477,24 +489,41 @@ def layer_share(ds, th, ctx):
         actual = {k: by[k] / total for k in target}
     if all(abs(actual[k] - target[k]) <= th["layer_share_tolerance"] for k in target):
         return []
-    return [finding("layer_share", "white", "account", ACCOUNT, "Доли бюджета по слоям далеки от рекомендованных",
-                    {"actual": {k: round(v, 3) for k, v in actual.items()}, "target": target,
-                     "month_spend_rub": round(month, 2)},
-                    "Перераспределить бюджет между тёплым, LAL и холодным слоями")]
+    guessed = sum(g["stats"]["spent"] for g in gs if _guessed(g))
+    f = finding("layer_share", "white", "account", ACCOUNT, "Доли бюджета по слоям далеки от рекомендованных",
+                {"actual": {k: round(v, 3) for k, v in actual.items()}, "target": target,
+                 "month_spend_rub": round(month, 2)},
+                "Перераспределить бюджет между тёплым, LAL и холодным слоями")
+    if guessed:   # как stale_list без связей: карточка низкой надёжности, B3 — «нет данных», а не ❌
+        f.update(confidence="low", tentative=True)
+        f["title"] += " (слои части групп определены по догадке)"
+        f["evidence"]["guessed_share"] = round(guessed / total, 3)
+    return [f]
 
 
 @rule
 def mixed_plan(ds, th, ctx):
     by_plan = defaultdict(set)
+    guessed = set()
     for g in _live(ds):
         if _active(g, th) and g.get("ad_plan_id") is not None and _layer(g) is not None:
             by_plan[g["ad_plan_id"]].add(_layer(g))
+            if _guessed(g):
+                guessed.add(g["ad_plan_id"])
     plans = {p["id"]: p for p in ds["plans"]}
     _seen(ctx, "mixed_plan", len(by_plan))
-    return [finding("mixed_plan", "white", "plan", plans.get(pid, {"id": pid, "name": ""}),
+    out = []
+    for pid, layers in by_plan.items():
+        if len(layers) < 2:
+            continue
+        f = finding("mixed_plan", "white", "plan", plans.get(pid, {"id": pid, "name": ""}),
                     "В одной кампании смешаны разные слои аудиторий", {"layers": sorted(layers)},
                     "Разнести: один сегмент — одна кампания")
-            for pid, layers in by_plan.items() if len(layers) > 1]
+        if pid in guessed:
+            f.update(confidence="low", tentative=True)
+            f["title"] += " (слои части групп определены по догадке)"
+        out.append(f)
+    return out
 
 
 @rule
@@ -1152,7 +1181,10 @@ def funnel_status(ds: dict, th: dict) -> dict:
             if not layers_known:
                 out[key] = ("unknown", "слои аудиторий не определены — таргетинги не получены")
                 continue
-            ok = any(_layer(g) == "warm" for g in live)
+            ok = any(_layer(g) == "warm" and not _guessed(g) for g in live)
+            if not ok and any(_layer(g) == "warm" for g in live):   # тёплый только по догадке — не ✅ и не ❌
+                out[key] = ("unknown", "ретаргетинг не подтверждён: " + GUESSED_REASON)
+                continue
         elif key == "senler":   # единственная воронка по объявлениям; остальные — по цели и слоям групп
             if not ds["coverage"].get("banners"):
                 out[key] = ("unknown", "объявления не собирались")
