@@ -284,3 +284,37 @@ def test_non_json_tool_text_not_echoed():
     with pytest.raises(McpError) as exc:
         McpClient(SECRET_URL, transport=transport).call("vk_ads_auth_check")
     assert str(exc.value) == "vk_ads_auth_check: ответ не JSON"
+
+
+# ---- 429 с limits = 0: нет прав, повтор бесполезен (живой прогон 16.10.2026, users_lists_list) ----
+
+@pytest.mark.parametrize("body", [
+    {"error": True, "status": 429, "limits": {"1": 0}},
+    {"error": True, "status": 429, "detail": {"limits": {"1": 0}, "message": "Too many requests"}},
+    {"error": True, "status": 429, "detail": json.dumps({"error": {"limits": {"1": 0}}})},
+    {"error": True, "status": 429, "detail": {"error": {"code": "rate_limit", "limits": {"1": 0, "2": 0}}}},
+])
+def test_429_with_zero_limits_is_no_access_and_not_retried(body):
+    sleeps = []
+    transport = FakeTransport(tool_error(body), ok({"items": []}))
+    client = McpClient(SECRET_URL, transport=transport, sleep=sleeps.append)
+    with pytest.raises(McpError) as exc:
+        client.call("vk_ads_users_lists_list", {})
+    assert exc.value.no_access is True and exc.value.status == 429
+    assert "нет доступа" in str(exc.value)
+    assert len(transport.payloads) == 1 and sleeps == []
+
+
+def test_429_with_positive_limits_still_retried():
+    transport = FakeTransport(tool_error({"error": True, "status": 429, "limits": {"1": 5}}), ok({"ok": True}))
+    client = McpClient(SECRET_URL, transport=transport, sleep=lambda s: None)
+    assert client.call("vk_ads_auth_check") == {"ok": True}
+    assert len(transport.payloads) == 2
+
+
+def test_other_errors_are_not_no_access():
+    transport = FakeTransport(tool_error({"error": True, "status": 400, "detail": "bad"}))
+    client = McpClient(SECRET_URL, transport=transport, sleep=lambda s: None)
+    with pytest.raises(McpError) as exc:
+        client.call("vk_ads_auth_check")
+    assert exc.value.no_access is False

@@ -33,10 +33,12 @@ Transport = Callable[[str, dict], dict]
 
 
 class McpError(Exception):
-    def __init__(self, message: str, status: Optional[int] = None, *, retryable: bool = False):
+    def __init__(self, message: str, status: Optional[int] = None, *, retryable: bool = False,
+                 no_access: bool = False):
         super().__init__(message)
         self.status = status
         self.retryable = retryable
+        self.no_access = no_access   # 429 с limits = 0: у подключения нет прав на этот ресурс, повтор бесполезен
 
 
 class ForbiddenToolError(McpError):
@@ -79,6 +81,26 @@ def http_transport(url: str, payload: dict, timeout: float = 60.0) -> dict:
     return parse_body(content_type, text)
 
 
+def _zero_limits(v) -> bool:
+    """В теле ошибки (на любой глубине, в том числе строкой-JSON) есть limits с нулевым значением."""
+    if isinstance(v, str):
+        try:
+            v = json.loads(v)
+        except ValueError:
+            return False
+        if isinstance(v, str):
+            return False
+    if isinstance(v, dict):
+        lim = v.get("limits")
+        if isinstance(lim, dict) and any(isinstance(x, (int, float)) and not isinstance(x, bool) and x == 0
+                                         for x in lim.values()):
+            return True
+        return any(_zero_limits(x) for x in v.values())
+    if isinstance(v, list):
+        return any(_zero_limits(x) for x in v)
+    return False
+
+
 def _tool_error(tool: str, text: str) -> McpError:
     status, message = None, text
     try:
@@ -99,6 +121,9 @@ def _tool_error(tool: str, text: str) -> McpError:
         message = detail or text
     if status is None and "rate_limit" in text:
         status = 429
+    if status == 429 and obj is not None and _zero_limits(obj):
+        return McpError(f"{tool}: нет доступа (лимит запросов 0 — у подключения нет прав на этот ресурс)",
+                        status=429, no_access=True)
     return McpError(f"{tool}: {message}"[:500], status=status)
 
 
@@ -127,7 +152,7 @@ class McpClient:
                 raise
             except McpError as e:
                 attempt += 1
-                if (e.status not in RETRY_STATUSES and not e.retryable) or attempt > self._retries:
+                if e.no_access or (e.status not in RETRY_STATUSES and not e.retryable) or attempt > self._retries:
                     raise
                 self._sleep(self._backoff * attempt)
 
