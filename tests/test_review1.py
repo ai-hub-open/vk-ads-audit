@@ -234,7 +234,9 @@ def test_group_with_utm_template_is_tagged(tmp_path):
     cabinet(raw, [_active(1, utm=tpl), _active(2, enable_utm=True, utm=None), _active(3, utm=None),
                   _active(4, enable_utm=False, utm="")])
     g = {x["id"]: x["auto_utm"] for x in build_dataset(raw, *D)["groups"]}
-    assert g == {1: True, 2: True, 3: False, 4: False}      # ключ enable_utm у других групп есть: отсутствие = выключено
+    # Второй живой прогон: отсутствие ключа enable_utm «выключено» не означает (не подтверждено) — 3 теперь None;
+    # явный enable_utm false с пустым шаблоном (4) — по-прежнему False.
+    assert g == {1: True, 2: True, 3: None, 4: False}
 
 
 def test_utm_unknown_when_no_enable_utm_anywhere_and_no_template(tmp_path):

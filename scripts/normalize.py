@@ -243,14 +243,16 @@ def _blind_ids(raw_dir: Path, tool: str, keys) -> set:
 
 
 def _auto_utm(g, observed):
-    """Группа размечена: enable_utm true или в utm непустой шаблон (живой прогон: ключ enable_utm у части групп
-    опущен — отсутствие = выключено, если ключ встречался у других)."""
+    """True — группа размечена: enable_utm true или в utm непустой шаблон; False — только явный enable_utm false;
+    None — ключа нет и шаблона нет. Живой прогон: enable_utm приходит только со значением true, у остальных групп ключ
+    опущен, а что это «выключено» — не подтверждено (второй прогон 16.10.2026): правило utm_missing по None молчит."""
     utm = g.get("utm")
     if isinstance(utm, str) and utm.strip():
         return True
     if not any(k in observed for k in AUTO_UTM_KEYS):
         return None
-    return bool(first_known(g, AUTO_UTM_KEYS, observed))
+    flag = next((g[k] for k in AUTO_UTM_KEYS if g.get(k) is not None), None)
+    return None if flag is None else bool(flag)
 
 
 WINDOWS = (7, 14, 30)

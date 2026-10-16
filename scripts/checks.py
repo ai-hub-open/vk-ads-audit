@@ -13,10 +13,10 @@ from collections import defaultdict
 
 try:
     from scripts.diagnose import (ASK_FUNNELS, FUNNEL_LABELS, _active, _banner_groups, _banners, _date, _feat, _layer,
-                                  _live, _run_days, funnel_status)
+                                  _live, _run_days, funnel_status, utm_unconfirmed_groups, utm_unconfirmed_reason)
 except ImportError:  # запуск напрямую
     from diagnose import (ASK_FUNNELS, FUNNEL_LABELS, _active, _banner_groups, _banners, _date, _feat, _layer, _live,
-                          _run_days, funnel_status)
+                          _run_days, funnel_status, utm_unconfirmed_groups, utm_unconfirmed_reason)
 
 BLOCKS = [("A", "Техническая настройка"), ("B", "Структура аккаунта"), ("C", "Таргетинг"),
           ("D", "Бюджет и стратегия"), ("E", "Объявления"), ("F", "Эффективность"),
@@ -91,10 +91,12 @@ def run_checks(ds: dict, th: dict, findings: list, evaluated: dict | None = None
     by_rules("A2", "Креативы промаркированы (erid)", ["ord_missing"],
              _first(no_banners, OK if any(b.get("erid") is not None for b in banners)
                     else _unknown("erid / маркировка ОРД")))
-    by_rules("A3", "UTM-метки на объявлениях", ["utm_missing"],
-             _first(no_banners, _known_banner(banners, "urls", "ссылки объявлений"),
-                    OK if any(g.get("auto_utm") is not None for g in _live(ds))
-                    else _unknown("авто-UTM группы")))
+    # Авто-UTM без ключа enable_utm — «не подтверждено» (None): реальная находка ❌ остаётся, иначе ✅ не ставим.
+    a3_gate = _first(no_banners, _known_banner(banners, "urls", "ссылки объявлений"))
+    unconfirmed = utm_unconfirmed_groups(ds, th)
+    if not a3_gate[0] and not fired.get("utm_missing") and unconfirmed:
+        a3_gate = ("unknown", utm_unconfirmed_reason(len(unconfirmed)))
+    by_rules("A3", "UTM-метки на объявлениях", ["utm_missing"], a3_gate)
 
     # B
     funnels = funnel_status(ds, th)

@@ -16,10 +16,12 @@ from html import escape
 try:
     from scripts._console import setup_console
     from scripts._workspace import resolve_workspace
+    from scripts.diagnose import load_thresholds, utm_unconfirmed_groups, utm_unconfirmed_text
     from scripts.raw_store import mark_recovered
 except ImportError:  # запуск напрямую
     from _console import setup_console
     from _workspace import resolve_workspace
+    from diagnose import load_thresholds, utm_unconfirmed_groups, utm_unconfirmed_text
     from raw_store import mark_recovered
 
 LEVELS = [("red", "🔴 Срезать слив"), ("orange", "🟠 Починить"), ("green", "🟢 Масштабировать"),
@@ -71,7 +73,8 @@ def _lists_no_access(c: dict) -> bool:
     return c.get("tool") == "vk_ads_users_lists_list" and bool(c.get("no_access")) and not c.get("ok")
 
 
-def limitations(ds: dict, collect_log=None, checklist=None) -> list:
+def limitations(ds: dict, collect_log=None, checklist=None, th=None) -> list:
+    th = th or load_thresholds()
     lines = list(ALWAYS_LIMITATIONS)
     cov = ds["coverage"]
     lines.extend(ds.get("notes") or [])
@@ -101,9 +104,12 @@ def limitations(ds: dict, collect_log=None, checklist=None) -> list:
         lines.append("Пиксели кабинета не проверялись.")
     if (collect_log or {}).get("aborted"):
         lines.append(f"Сбор прерван: {collect_log['aborted']}")
+    unconfirmed = utm_unconfirmed_groups(ds, th)
+    if unconfirmed:   # своя строка вместо «Не проверено «UTM…»» — и при ❌ по другим группам
+        lines.append(utm_unconfirmed_text(len(unconfirmed)))
     for b in (checklist or {}).get("blocks", []):
         for c in b["checks"]:
-            if c["status"] == "unknown":
+            if c["status"] == "unknown" and not (c["id"] == "A3" and unconfirmed):
                 lines.append(f"Не проверено «{c['title']}»: {c['reason']}")
     return lines
 

@@ -48,6 +48,23 @@ CHECK_OF = {
 }
 
 
+def plural(n: int, one: str, few: str, many: str) -> str:
+    """Русская форма по числу: 1 группа, 2 группы, 5 групп (11–14 — «много»)."""
+    if n % 10 == 1 and n % 100 != 11:
+        return one
+    return few if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14) else many
+
+
+def utm_unconfirmed_reason(n: int) -> str:
+    return f"авто-UTM у {n} {plural(n, 'группы', 'групп', 'групп')} не подтверждена API — проверьте в кабинете"
+
+
+def utm_unconfirmed_text(n: int) -> str:
+    """Строка «Ограничений»: та же причина, что у A3 «unknown», с заглавной буквы."""
+    r = utm_unconfirmed_reason(n)
+    return r[0].upper() + r[1:] + "."
+
+
 def rule(fn):
     RULES.append(fn)
     return fn
@@ -357,17 +374,36 @@ def ord_missing(ds, th, ctx):
                     "Включить автоматическую маркировку в кабинете и проверить данные рекламодателя")]
 
 
+def _has_utm(b) -> bool:
+    return any("utm_" in u for u in b.get("urls") or [])
+
+
+def _site_banners(ds, th) -> list:
+    """Активные объявления живых групп со ссылкой на сайт (не на VK и мессенджеры)."""
+    return [b for b in _banners(ds) if b["status"] in th["active_statuses"]
+            and any(_site_url(u, th) for u in b.get("urls") or [])]
+
+
+def utm_unconfirmed_groups(ds, th) -> list:
+    """id групп, где авто-UTM не подтверждена API (auto_utm None), а объявление на сайт без utm_ в ссылке:
+    есть ли метки, не определить — проверить в кабинете."""
+    auto = {g["id"]: g.get("auto_utm") for g in _live(ds)}
+    return sorted({b["group_id"] for b in _site_banners(ds, th)
+                   if b["group_id"] in auto and auto[b["group_id"]] is None and not _has_utm(b)}, key=str)
+
+
 @rule
 def utm_missing(ds, th, ctx):
-    known = {g["id"]: g["auto_utm"] for g in ds["groups"] if g.get("auto_utm") is not None}  # None — молчим
-    site = [b for b in _banners(ds) if b["status"] in th["active_statuses"] and b["group_id"] in known
-            and any(_site_url(u, th) for u in b.get("urls") or [])]
-    _seen(ctx, "utm_missing", len(site))  # группы с авто-UTM проверены: метки им ставит VK
-    bad = [b for b in site if known[b["group_id"]] is False and not any("utm_" in u for u in b.get("urls") or [])]
+    auto = {g["id"]: g.get("auto_utm") for g in _live(ds)}
+    site = [b for b in _site_banners(ds, th) if b["group_id"] in auto]
+    # utm_ в ссылке — метки есть; авто-UTM включена — их ставит VK; None без utm_ — не подтверждено, молчим
+    checked = [b for b in site if _has_utm(b) or auto[b["group_id"]] is not None]
+    _seen(ctx, "utm_missing", len(checked))
+    bad = [b for b in checked if auto[b["group_id"]] is False and not _has_utm(b)]
     if not bad:
         return []
     return [finding("utm_missing", "orange", "account", ACCOUNT, "Ссылки на сайт без UTM-меток",
-                    {"without_utm": len(bad), "site_banners": len(site), "examples": [b["id"] for b in bad[:5]]},
+                    {"without_utm": len(bad), "site_banners": len(checked), "examples": [b["id"] for b in bad[:5]]},
                     "Разметить все ссылки UTM — иначе не понять, какие объявления приводят целевой трафик")]
 
 

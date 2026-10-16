@@ -402,7 +402,7 @@ def test_v1_fields(tmp_path):
     assert g1["layer"] == "lal" and g2["layer"] == "cold"
     assert g1["features"]["has_keywords"] is True and g2["features"]["has_keywords"] is False
     assert g1["max_price_rub"] == 50.0 and g2["max_price_rub"] is None
-    assert g1["auto_utm"] is True and g2["auto_utm"] is False
+    assert g1["auto_utm"] is True and g2["auto_utm"] is None   # нет ключа enable_utm — не подтверждено (2-й прогон)
     b = ds["banners"][0]
     assert b["cta"] == "sign_up" and b["text"] == "Запишитесь" and b["erid"] == "Kra23"
     assert b["urls"] == ["https://s.ru/?utm_source=vk"] and b["ratios"] == ["1:1"] and b["content_ids"] == [50]

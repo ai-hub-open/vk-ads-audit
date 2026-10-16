@@ -160,3 +160,65 @@ def test_no_access_then_success_is_not_no_access(tmp_path):
     assert norm_main(["--workspace", str(ws), "--date-from", D[0], "--date-to", D[1]]) == 0
     ds = json.loads((ws / "dataset.json").read_text(encoding="utf-8"))
     assert ds["coverage"]["users_lists_no_access"] is False
+
+
+# ---- 9. авто-UTM: нет ключа enable_utm и шаблона — «не подтверждено» (None), а не «выключено» ----
+
+SITE = {"p": {"url": "https://shop.ru/catalog"}}
+SITE_UTM = {"p": {"url": "https://shop.ru/catalog?utm_source=vk"}}
+
+
+def test_auto_utm_absent_key_is_unknown_not_false(tmp_path):
+    raw = tmp_path / "raw"
+    cabinet(raw, [_active(1, enable_utm=True), _active(2, utm="utm_source=vk_ads&utm_campaign={{campaign_id}}"),
+                  _active(3), _active(4, utm=None), _active(5, enable_utm=False)])
+    g = {x["id"]: x["auto_utm"] for x in build_dataset(raw, *D)["groups"]}
+    assert g == {1: True, 2: True, 3: None, 4: None, 5: False}   # явный false — однозначен, отсутствие ключа — нет
+
+
+def _utm_cabinet(raw, url):
+    cabinet(raw, [_active(1, enable_utm=True), _active(2)], daily={1: day_rows(2), 2: day_rows(2)},
+            banners_by_group={1: [{"id": 11, "status": "active", "urls": SITE}],
+                              2: [{"id": 21, "status": "active", "urls": url}]})
+    return build_dataset(raw, *D)
+
+
+def test_utm_missing_silent_and_a3_unknown_for_unconfirmed_group(tmp_path):
+    from scripts.render_report import limitations
+    ds = _utm_cabinet(tmp_path / "raw", SITE)
+    assert found(ds, "utm_missing") == []
+    cl = checklist(ds)
+    a3 = row(cl, "A3")
+    assert a3["status"] == "unknown" and "не подтверждена API" in a3["reason"]
+    lines = limitations(ds, None, cl)
+    assert lines.count("Авто-UTM у 1 группы не подтверждена API — проверьте в кабинете.") == 1
+    assert not any("«UTM-метки на объявлениях»" in x for x in lines)      # без дубля «Не проверено …»
+
+
+def test_unconfirmed_group_with_utm_in_link_is_fine(tmp_path):
+    from scripts.render_report import limitations
+    ds = _utm_cabinet(tmp_path / "raw", SITE_UTM)
+    cl = checklist(ds)
+    assert found(ds, "utm_missing") == [] and row(cl, "A3")["status"] == "pass"
+    assert not any("Авто-UTM" in x for x in limitations(ds, None, cl))
+
+
+def test_explicit_false_still_fires_even_with_unconfirmed_neighbours(tmp_path):
+    from scripts.render_report import limitations
+    raw = tmp_path / "raw"
+    cabinet(raw, [_active(1, enable_utm=False), _active(2), _active(3)],
+            banners_by_group={1: [{"id": 11, "status": "active", "urls": SITE}],
+                              2: [{"id": 21, "status": "active", "urls": SITE}],
+                              3: [{"id": 31, "status": "active", "urls": SITE}]})
+    ds = build_dataset(raw, *D)
+    f = found(ds, "utm_missing")
+    assert f and f[0]["evidence"]["examples"] == [11]
+    cl = checklist(ds)
+    assert row(cl, "A3")["status"] == "fail"
+    assert "Авто-UTM у 2 групп не подтверждена API — проверьте в кабинете." in limitations(ds, None, cl)
+
+
+def test_utm_docs_updated():
+    rules, tools_doc = _ref("diagnostic-rules.md"), _ref("mcp-read-tools.md")
+    assert "не подтверждена API" in rules and "нет ключа = выключено" not in tools_doc
+    assert "Авто-UTM у N групп не подтверждена API" in _ref("limitations.md")
