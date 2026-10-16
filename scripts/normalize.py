@@ -361,9 +361,16 @@ def _groups_gen(n: int) -> str:
     return f"{n} {plural(n, 'группы', 'групп', 'групп')}"
 
 
+def lists_no_access_call(c: dict) -> bool:
+    """Сбой vk_ads_users_lists_list из-за прав: флаг no_access или code zero_quota в ошибке при любом HTTP-статусе
+    (MCP 0.12.0 — 403; путь A: модель могла не поставить флаг)."""
+    return (c.get("tool") == "vk_ads_users_lists_list" and not c.get("ok", True)
+            and bool(c.get("no_access") or "zero_quota" in str(c.get("error") or "")))
+
+
 def _no_access_to_lists(collect_log) -> bool:
-    return any(c.get("tool") == "vk_ads_users_lists_list" and not c.get("ok", True) and c.get("no_access")
-               and not c.get("recovered") for c in (mark_recovered(collect_log) or {}).get("calls", []))
+    return any(lists_no_access_call(c) and not c.get("recovered")
+               for c in (mark_recovered(collect_log) or {}).get("calls", []))
 
 
 def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, path: str = "B",

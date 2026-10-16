@@ -554,3 +554,61 @@ def test_failed_call_limitation_is_human():
     lines = limitations(make_ds([make_group(1)]), log)
     bad = [x for x in lines if x.startswith("Не удалось получить")]
     assert bad == ["Не удалось получить список пикселей: ошибка VK 504 (upstream_timeout)"]
+
+
+# ---- 4. Сбор: сегменты с relations, «нет доступа» по zero_quota при любом HTTP-статусе ----
+
+ZERO_QUOTA_403 = {"error": True, "status": 403, "url": "/api/v2/remarketing/users_lists.json", "code": "zero_quota",
+                  "retryable": False, "detail": {"remaining": {"1": 0}, "limits": {"1": 0},
+                                                 "hint": "Лимит запросов равен нулю", "upstream_status": 429}}
+
+
+def test_zero_quota_403_is_no_access_and_not_retried():
+    import pytest
+    from scripts.mcp_client import McpClient, McpError
+    from tests.test_mcp_client import SECRET_URL, FakeTransport, ok, tool_error
+    sleeps = []
+    for body in (ZERO_QUOTA_403, {"error": True, "status": 500, "code": "zero_quota"}):
+        transport = FakeTransport(tool_error(body), ok({"items": []}))
+        with pytest.raises(McpError) as exc:
+            McpClient(SECRET_URL, transport=transport, sleep=sleeps.append).call("vk_ads_users_lists_list", {})
+        assert exc.value.no_access is True and len(transport.payloads) == 1
+    assert sleeps == []
+
+
+def test_normalize_recognizes_zero_quota_without_flag(tmp_path):
+    import json
+    raw = tmp_path / "raw"
+    cabinet(raw, [_active(1)], daily={1: day_rows(2)})
+    log = {"calls": [{"tool": "vk_ads_users_lists_list", "arguments": {}, "ok": False,
+                      "error": json.dumps(ZERO_QUOTA_403, ensure_ascii=False)}]}      # путь A: флаг забыли
+    ds = build_dataset(raw, *D, collect_log=log)
+    assert ds["coverage"]["users_lists_no_access"] is True
+    from scripts.render_report import limitations
+    lines = limitations(ds, log)
+    assert not any(x.startswith("Не удалось получить базы клиентов") for x in lines)
+    assert sum("Нет доступа к базам клиентов" in x for x in lines) == 1
+
+
+def test_collect_asks_segments_with_relations_and_falls_back(tmp_path):
+    from scripts.collect import SEGMENT_FIELDS, collect
+    from scripts.mcp_client import McpError
+    from tests.test_collect import FakeClient, groups, tools
+    assert SEGMENT_FIELDS == "id,name,pass_condition,flags,relations,relations_count,created,updated"
+    client = FakeClient(groups(1))
+    collect(client, tmp_path / "a" / "raw", "2026-09-01", "2026-09-30")
+    assert [a.get("fields") for a in tools(client, "vk_ads_remarketing_segments_list")] == [SEGMENT_FIELDS]
+
+    class RejectFields(FakeClient):
+        def paginate(self, tool, arguments=None, **kw):
+            if tool == "vk_ads_remarketing_segments_list" and "fields" in (arguments or {}):
+                self._check(tool, arguments)
+                raise McpError(f"{tool}: 400 unknown_resource_fields", status=400)
+            return super().paginate(tool, arguments, **kw)
+
+    client = RejectFields(groups(1))
+    log = collect(client, tmp_path / "b" / "raw", "2026-09-01", "2026-09-30")
+    seg = tools(client, "vk_ads_remarketing_segments_list")
+    assert [("fields" in a) for a in seg] == [True, False]
+    calls = [c for c in log["calls"] if c["tool"] == "vk_ads_remarketing_segments_list"]
+    assert calls[0]["superseded"] is True and calls[1]["ok"] is True

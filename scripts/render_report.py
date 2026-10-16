@@ -20,7 +20,7 @@ try:
     from scripts.diagnose import (_banners, bidding_label, load_thresholds, utm_unconfirmed_groups,
                                   utm_unconfirmed_reason, utm_unconfirmed_text)
     from scripts.features import group_status_label, is_live_group, issue_label, ord_status_label
-    from scripts.normalize import zero_spend_head
+    from scripts.normalize import lists_no_access_call, zero_spend_head
     from scripts.raw_store import mark_recovered
 except ImportError:  # запуск напрямую
     from _console import setup_console
@@ -28,7 +28,7 @@ except ImportError:  # запуск напрямую
     from diagnose import (_banners, bidding_label, load_thresholds, utm_unconfirmed_groups, utm_unconfirmed_reason,
                           utm_unconfirmed_text)
     from features import group_status_label, is_live_group, issue_label, ord_status_label
-    from normalize import zero_spend_head
+    from normalize import lists_no_access_call, zero_spend_head
     from raw_store import mark_recovered
 
 LEVELS = [("red", "🔴 Срезать слив"), ("orange", "🟠 Починить"), ("green", "🟢 Масштабировать"),
@@ -213,7 +213,7 @@ def _error_brief(error) -> str:
 
 
 def _lists_no_access(c: dict) -> bool:
-    return c.get("tool") == "vk_ads_users_lists_list" and bool(c.get("no_access")) and not c.get("ok")
+    return lists_no_access_call(c)
 
 
 def limitations(ds: dict, collect_log=None, checklist=None, th=None) -> list:

@@ -38,7 +38,7 @@ class McpError(Exception):
         super().__init__(message)
         self.status = status
         self.retryable = retryable
-        self.no_access = no_access   # 429 с limits = 0: у подключения нет прав на этот ресурс, повтор бесполезен
+        self.no_access = no_access   # zero_quota (403) или 429 с limits = 0: нет прав на ресурс, повтор бесполезен
 
 
 class ForbiddenToolError(McpError):
@@ -101,6 +101,20 @@ def _zero_limits(v) -> bool:
     return False
 
 
+def _has_code(v, code: str) -> bool:
+    """В теле ошибки (на любой глубине, в том числе строкой-JSON) есть "code": code."""
+    if isinstance(v, str):
+        try:
+            v = json.loads(v)
+        except ValueError:
+            return False
+    if isinstance(v, dict):
+        return v.get("code") == code or any(_has_code(x, code) for x in v.values() if isinstance(x, (dict, list, str)))
+    if isinstance(v, list):
+        return any(_has_code(x, code) for x in v)
+    return False
+
+
 def _tool_error(tool: str, text: str) -> McpError:
     status, message = None, text
     try:
@@ -121,9 +135,11 @@ def _tool_error(tool: str, text: str) -> McpError:
         message = detail or text
     if status is None and "rate_limit" in text:
         status = 429
-    if status == 429 and obj is not None and _zero_limits(obj):
+    # Третий живой прогон (MCP 0.12.0): нет прав — HTTP 403 с code zero_quota; раньше — 429 с limits 0.
+    # zero_quota — нет доступа при любом статусе.
+    if obj is not None and (_has_code(obj, "zero_quota") or (status == 429 and _zero_limits(obj))):
         return McpError(f"{tool}: нет доступа (лимит запросов 0 — у подключения нет прав на этот ресурс)",
-                        status=429, no_access=True)
+                        status=status, no_access=True)
     return McpError(f"{tool}: {message}"[:500], status=status)
 
 
