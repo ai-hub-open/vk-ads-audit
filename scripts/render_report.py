@@ -16,12 +16,12 @@ from html import escape
 try:
     from scripts._console import setup_console
     from scripts._workspace import resolve_workspace
-    from scripts.diagnose import load_thresholds, utm_unconfirmed_groups, utm_unconfirmed_text
+    from scripts.diagnose import bidding_label, load_thresholds, utm_unconfirmed_groups, utm_unconfirmed_text
     from scripts.raw_store import mark_recovered
 except ImportError:  # запуск напрямую
     from _console import setup_console
     from _workspace import resolve_workspace
-    from diagnose import load_thresholds, utm_unconfirmed_groups, utm_unconfirmed_text
+    from diagnose import bidding_label, load_thresholds, utm_unconfirmed_groups, utm_unconfirmed_text
     from raw_store import mark_recovered
 
 LEVELS = [("red", "🔴 Срезать слив"), ("orange", "🟠 Починить"), ("green", "🟢 Масштабировать"),
@@ -162,7 +162,8 @@ def _questions_html(qs) -> str:
     return f"<h2>Вопросы к клиенту</h2><ul>{items}</ul>"
 
 
-def render(ds: dict, findings: dict, collect_log=None, title: str = "") -> str:
+def render(ds: dict, findings: dict, collect_log=None, title: str = "", th=None) -> str:
+    th = th or load_thresholds()
     t = ds["totals"]
     tiles = [("Расход", fmt_rub(t["spent"])), ("Показы", _num(t["shows"])), ("Клики", _num(t["clicks"])),
              ("Конверсии", _num(t["conversions"])), ("CPA", fmt_rub(t["cpa"])), ("CTR", fmt_pct(t["ctr_pct"]))]
@@ -186,14 +187,15 @@ def render(ds: dict, findings: dict, collect_log=None, title: str = "") -> str:
             parts.append(f"<h2>{label} ({len(items)})</h2>" + "".join(_finding_html(f) for f in items))
     parts.append(_questions_html(findings.get("questions")))
     rows = "".join(
-        f"<tr><td>{escape(g['name'])}</td><td>{escape(str(g['status']))}</td><td>{fmt_rub(g['stats']['spent'])}</td>"
+        f"<tr><td>{escape(g['name'])}</td><td>{escape(str(g['status']))}</td>"
+        f"<td>{escape(bidding_label(g.get('autobidding_mode'), th) or '—')}</td><td>{fmt_rub(g['stats']['spent'])}</td>"
         f"<td>{g['stats']['conversions']}</td><td>{fmt_rub(g['stats']['cpa'])}</td>"
         f"<td>{fmt_pct(g['stats']['ctr_pct'])}</td><td>{len(g['banner_ids'])}</td></tr>"
         for g in sorted(ds["groups"], key=lambda g: -g["stats"]["spent"]) if g["status"] != "deleted")
-    parts.append("<h2>Структура</h2><table><tr><th>Группа</th><th>Статус</th><th>Расход</th><th>Конв.</th>"
+    parts.append("<h2>Структура</h2><table><tr><th>Группа</th><th>Статус</th><th>Ставка</th><th>Расход</th><th>Конв.</th>"
                  f"<th>CPA</th><th>CTR</th><th>Объявл.</th></tr>{rows}</table>")
     parts.append("<h2>Ограничения</h2><ul>" +
-                 "".join(f"<li>{escape(x)}</li>" for x in limitations(ds, collect_log, findings.get("checklist")))
+                 "".join(f"<li>{escape(x)}</li>" for x in limitations(ds, collect_log, findings.get("checklist"), th))
                  + "</ul></body></html>")
     return "\n".join(parts)
 

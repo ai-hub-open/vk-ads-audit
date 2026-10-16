@@ -222,3 +222,51 @@ def test_utm_docs_updated():
     rules, tools_doc = _ref("diagnostic-rules.md"), _ref("mcp-read-tools.md")
     assert "не подтверждена API" in rules and "нет ключа = выключено" not in tools_doc
     assert "Авто-UTM у N групп не подтверждена API" in _ref("limitations.md")
+
+
+# ---- 7. second_price_mean — ручная ставка, не автостратегия ----
+
+def _manual(i=1, **kw):
+    return make_group(i, autobidding_mode="second_price_mean", **kw)
+
+
+def test_second_price_mean_is_manual_bid_in_dictionary():
+    from scripts.diagnose import _is_auto, _is_manual, bidding_label
+    g = _manual()
+    assert "second_price_mean" in TH["manual_bidding_modes"] and not _is_auto(g, TH) and _is_manual(g, TH)
+    assert bidding_label("second_price_mean", TH) == "ручная ставка"
+    assert bidding_label("max_goals", TH) == "автостратегия"
+    assert bidding_label("something_new", TH) is None and bidding_label(None, TH) is None
+
+
+def test_auto_strategy_rules_skip_manual_bid():
+    daily = [{"date": f"2026-09-{d:02d}", **stats(100, 1000, 10, 0)} for d in range(1, 31)]
+    g = _manual(stats=stats(3000, 30000, 300, 2), daily=daily, budget_day_rub=400.0)
+    ds = make_ds([g])
+    assert found(ds, "learning_starved") == []
+    assert [f["level"] for f in found(ds, "low_budget")] == ["white"]          # 300–500 ₽ — гигиена, не «обучение»
+    assert row(checklist(ds), "D3")["status"] == "na"                          # автостратегий нет — нечего проверять
+
+
+def test_manual_bid_first_week_gives_no_new_orange():
+    w7 = stats(200, 2000, 20, 1)
+    young = [{"date": f"2026-09-{d:02d}", **stats(100, 1000, 10, 0)} for d in range(25, 31)]
+    g = _manual(max_price_rub=80.0, created="2026-09-25 00:00:00", daily=young, stats=stats(600, 6000, 60, 0),
+                windows={"7": w7, "14": None, "30": None})
+    ds = make_ds([g])
+    assert found(ds, "cap_too_early") == []                 # ручная ставка ≠ «предельная цена» на старте
+    d_rules = {"low_budget", "cap_too_early", "learning_starved", "blocking_issues"}
+    assert not [f for f in res(ds)["findings"] if f["rule"] in d_rules and f["level"] == "orange"]
+
+
+def test_report_names_bidding_mode_humanly():
+    from scripts.render_report import render
+    ds = make_ds([_manual(1), make_group(2, autobidding_mode="max_goals")])
+    html = render(ds, {**res(ds), "checklist": checklist(ds)})
+    assert "ручная ставка" in html and "автостратегия" in html and "second_price_mean" not in html
+
+
+def test_bidding_docs():
+    rules, tools_doc = _ref("diagnostic-rules.md"), _ref("mcp-read-tools.md")
+    assert "`second_price_mean`" in rules and "ручная ставка" in rules and "`manual_bidding_modes`" in rules
+    assert "second_price_mean" in tools_doc and "значение ручного режима неизвестно" not in tools_doc

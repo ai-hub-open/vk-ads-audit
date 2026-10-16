@@ -125,6 +125,16 @@ def _is_auto(g, th) -> bool:
     return g["autobidding_mode"] in th["auto_bidding_modes"]
 
 
+def _is_manual(g, th) -> bool:
+    """Ручная ставка (second_price_mean: ставка в price, фактический CPM — подтверждено 16.10.2026), не автостратегия."""
+    return g["autobidding_mode"] in th.get("manual_bidding_modes", [])
+
+
+def bidding_label(mode, th):
+    """Режим ставки по-человечески; неизвестный режим — None (сырое значение API в отчёт не идёт)."""
+    return th.get("bidding_mode_labels", {}).get(mode) if mode else None
+
+
 def _run_days(ds, g) -> int:
     rows = g["daily"]
     return sum(1 for r in rows if r["shows"] > 0) if rows else ds["period"]["days"]
@@ -683,6 +693,8 @@ def cap_too_early(ds, th, ctx):
         if not _active(g, th) or not g.get("max_price_rub") or g["objective"] not in th["conversion_objectives"]:
             continue
         if _is_auto(g, th):  # при автостратегии «предельная цена» — не ручной кап
+            continue
+        if _is_manual(g, th):  # ручная ставка — другой режим, не «предельная цена»; на старте не ограничение (решение Лизы)
             continue
         w7 = (g.get("windows") or {}).get("7")
         if w7 is None:  # окно 7 дней не получено — без подмены периодом целиком

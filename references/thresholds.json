@@ -5,6 +5,8 @@
   "recommended_daily_budget_rub": 500,
   "learning_budget_cpa_multiplier": 2,
   "auto_bidding_modes": ["max_goals"],
+  "manual_bidding_modes": ["second_price_mean"],
+  "bidding_mode_labels": {"max_goals": "автостратегия", "second_price_mean": "ручная ставка"},
   "blocking_issue_codes": ["NO_MONEY", "AD_PLAN_STOPPED"],
   "rejected_moderation_statuses": ["banned", "rejected"],
   "document_reason_markers": ["документ", "document", "лиценз", "сертификат"],
