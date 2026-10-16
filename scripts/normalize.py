@@ -32,8 +32,8 @@ try:
     from scripts.features import (AUTO_UTM_KEYS, ERID_KEYS, EXCLUDE_KEYS, ORD_STATUS_KEYS, PLAN_BUDGET_KEYS, SIZE_KEYS,
                                   UPDATED_KEYS, plural,
                                   SEGMENT_RELATION_KEYS, banner_text, content_features, first_known, is_lal,
-                                  is_live_group, layer_of, observed_keys, parse_dt, targeting_features,
-                                  url_strings, users_list_ids)
+                                  is_active_group, is_live_group, layer_of, observed_keys, parse_dt,
+                                  targeting_features, url_strings, users_list_ids)
     from scripts.collect import total_spend
     from scripts.raw_store import items_of, mark_recovered, read_calls
 except ImportError:  # запуск напрямую
@@ -42,8 +42,8 @@ except ImportError:  # запуск напрямую
     from features import (AUTO_UTM_KEYS, ERID_KEYS, EXCLUDE_KEYS, ORD_STATUS_KEYS, PLAN_BUDGET_KEYS, SIZE_KEYS,
                           UPDATED_KEYS, plural,
                           SEGMENT_RELATION_KEYS, banner_text, content_features, first_known, is_lal,
-                          is_live_group, layer_of, observed_keys, parse_dt, targeting_features,
-                          url_strings, users_list_ids)
+                          is_active_group, is_live_group, layer_of, observed_keys, parse_dt,
+                          targeting_features, url_strings, users_list_ids)
     from collect import total_spend
     from raw_store import items_of, mark_recovered, read_calls
 
@@ -363,6 +363,8 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
     ord_status_blind = _blind_ids(raw_dir, "vk_ads_banners_list", ORD_STATUS_KEYS)
     utm_blind = _blind_ids(raw_dir, "vk_ads_campaigns_list", AUTO_UTM_KEYS)
 
+    raw_plans = _list_items(raw_dir, "vk_ads_ad_plans_list")
+    plan_status = {p.get("id"): p.get("status") for p in raw_plans}
     objective_of: dict = {}
     unmeasured_freq: list = []
     groups = []
@@ -387,6 +389,7 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
         group = {
             "id": g["id"], "name": g.get("name") or "", "status": g.get("status"), "objective": obj,
             "package_id": g.get("package_id"), "ad_plan_id": g.get("ad_plan_id"),
+            "plan_status": plan_status.get(g.get("ad_plan_id")),   # кампания остановлена — группа на паузе
             "delivery": g.get("delivery"), "autobidding_mode": g.get("autobidding_mode"),
             "budget_day_rub": _rub(g.get("budget_limit_day")),
             "budget_total_rub": _rub(g.get("budget_limit")),
@@ -439,7 +442,7 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
     live_groups = [g for g in groups if _is_live(g)]
     counted = [g for g in groups if g["status"] != "deleted"]   # расход архивных групп в итогах остаётся
     if banner_calls:
-        uncovered = [g for g in live_groups if g["status"] == "active" and g["id"] not in banner_groups]
+        uncovered = [g for g in live_groups if is_active_group(g, ("active",)) and g["id"] not in banner_groups]
         if uncovered:
             notes.append(f"Объявления не собраны для {_groups_gen(len(uncovered))} — по ним выводы на уровне группы.")
     absent = [g for g in live_groups if g.get("stats_missing")]
@@ -462,7 +465,6 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
     def named(tool):
         return [{"id": x.get("id"), "name": x.get("name") or ""} for x in _list_items(raw_dir, tool)]
 
-    raw_plans = _list_items(raw_dir, "vk_ads_ad_plans_list")
     observed_p = observed_keys(raw_plans)
     plan_budget_known = any(k in observed_p for k in PLAN_BUDGET_KEYS)
 

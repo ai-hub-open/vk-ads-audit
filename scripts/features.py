@@ -50,6 +50,38 @@ def is_live_group(g) -> bool:
     return g.get("status") != "deleted" and "ARCHIVED" not in codes
 
 
+PLAN_STOPPED_STATUSES = ("blocked", "deleted")   # кампания (ad_plan) остановлена или удалена — группы в ней не крутятся
+PLAN_STOPPED_ISSUE = "AD_PLAN_STOPPED"
+
+
+def paused_by_plan(g) -> bool:
+    """Группа со статусом active, но её кампания остановлена (третий живой прогон: кампании выключили в день сбора,
+    у их групп status active и issue AD_PLAN_STOPPED). Такая группа на паузе, а не активна."""
+    issues = g.get("issues") or []
+    codes = {i.get("code") if isinstance(i, dict) else i for i in issues}
+    return g.get("plan_status") in PLAN_STOPPED_STATUSES or PLAN_STOPPED_ISSUE in codes
+
+
+def is_active_group(g, active_statuses) -> bool:
+    """Единый помощник «группа реально откручивает»: статус из active_statuses и кампания не остановлена."""
+    return g.get("status") in active_statuses and not paused_by_plan(g)
+
+
+GROUP_STATUS_LABELS = {"active": "активна", "blocked": "на паузе", "deleted": "удалена"}
+
+
+def group_status_label(g) -> str:
+    """Статус группы по-человечески: сырое значение API в отчёт не идёт (неизвестное — «другой статус (…)»)."""
+    if g.get("status") == "deleted":
+        return "удалена"
+    if not is_live_group(g):
+        return "в архиве"
+    if g.get("status") == "active" and paused_by_plan(g):
+        return "на паузе (кампания остановлена)"
+    st = g.get("status")
+    return GROUP_STATUS_LABELS.get(st) or (f"другой статус ({st})" if st else "—")
+
+
 def observed_keys(dicts) -> set:
     return {k for d in dicts if isinstance(d, dict) for k in d}
 

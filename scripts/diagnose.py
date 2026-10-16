@@ -21,11 +21,11 @@ from pathlib import Path
 try:
     from scripts._console import setup_console
     from scripts._workspace import SKILL_ROOT, resolve_workspace
-    from scripts.features import is_live_group, parse_dt, plural
+    from scripts.features import is_active_group, is_live_group, parse_dt, plural
 except ImportError:  # запуск напрямую
     from _console import setup_console
     from _workspace import SKILL_ROOT, resolve_workspace
-    from features import is_live_group, parse_dt, plural
+    from features import is_active_group, is_live_group, parse_dt, plural
 
 LEVEL_ORDER = {"red": 0, "orange": 1, "green": 2, "white": 3}
 DEFAULT_THRESHOLDS = SKILL_ROOT / "references" / "thresholds.json"
@@ -86,7 +86,8 @@ def confidence(clicks: int, th) -> str:
 
 
 def _active(g, th) -> bool:
-    return g["status"] in th["active_statuses"]
+    """Группа реально откручивает: активна и её кампания не остановлена (features.is_active_group)."""
+    return is_active_group(g, th["active_statuses"])
 
 
 def _live(ds):

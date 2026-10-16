@@ -18,14 +18,14 @@ try:
     from scripts._console import setup_console
     from scripts._workspace import resolve_workspace
     from scripts.diagnose import _banners, bidding_label, load_thresholds, utm_unconfirmed_groups, utm_unconfirmed_text
-    from scripts.features import is_live_group
+    from scripts.features import group_status_label, is_live_group
     from scripts.normalize import zero_spend_head
     from scripts.raw_store import mark_recovered
 except ImportError:  # запуск напрямую
     from _console import setup_console
     from _workspace import resolve_workspace
     from diagnose import _banners, bidding_label, load_thresholds, utm_unconfirmed_groups, utm_unconfirmed_text
-    from features import is_live_group
+    from features import group_status_label, is_live_group
     from normalize import zero_spend_head
     from raw_store import mark_recovered
 
@@ -219,7 +219,7 @@ def render(ds: dict, findings: dict, collect_log=None, title: str = "", th=None)
             parts.append(f"<h2>{label} ({len(items)})</h2>" + "".join(_finding_html(f) for f in items))
     parts.append(_questions_html(findings.get("questions")))
     rows = "".join(
-        f"<tr><td>{escape(g['name'])}</td><td>{escape(str(g['status']))}</td>"
+        f"<tr><td>{escape(g['name'])}</td><td>{escape(group_status_label(g))}</td>"
         f"<td>{escape(bidding_label(g.get('autobidding_mode'), th) or '—')}</td><td>{fmt_rub(g['stats']['spent'])}</td>"
         f"<td>{g['stats']['conversions']}</td><td>{fmt_rub(g['stats']['cpa'])}</td>"
         f"<td>{fmt_pct(g['stats']['ctr_pct'])}</td><td>{len(g['banner_ids'])}</td></tr>"

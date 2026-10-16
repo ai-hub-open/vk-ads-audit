@@ -15,12 +15,12 @@ from datetime import date, timedelta
 try:
     from scripts._console import setup_console
     from scripts._workspace import resolve_workspace
-    from scripts.features import is_live_group, plural
+    from scripts.features import is_active_group, is_live_group, plural
     from scripts.normalize import aggregate, zero_spend_head
 except ImportError:  # запуск напрямую
     from _console import setup_console
     from _workspace import resolve_workspace
-    from features import is_live_group, plural
+    from features import is_active_group, is_live_group, plural
     from normalize import aggregate, zero_spend_head
 
 SPIKE = 1.5
@@ -72,7 +72,7 @@ def quick_summary(ds: dict, day: str, target_cpa=None) -> dict:
         t = [r for r in g["daily"] if r["date"] == day]
         p = [r for r in g["daily"] if r["date"] in prev_days]
         flags = []
-        if has_today and g["status"] == "active":  # паузные группы в итогах есть, в флагах нет
+        if has_today and is_active_group(g, ("active",)):  # паузные (и в остановленной кампании) — в итогах, не во флагах
             flags = _flags(aggregate(t), aggregate(p), len({r["date"] for r in p}), target_cpa)
         ts = aggregate(t)
         groups.append({"id": g["id"], "name": g["name"], "spent": ts["spent"],
