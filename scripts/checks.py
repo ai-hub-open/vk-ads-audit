@@ -148,7 +148,10 @@ def run_checks(ds: dict, th: dict, findings: list, evaluated: dict | None = None
         OK if any(s.get("size") is not None for s in lal) else _unknown("размер LAL-сегмента"))
     by_rules("C13", "LAL от качественных баз", ["lal_small_source"], lal_gate)
     lists = ds.get("users_lists") or []
-    if not lists:
+    if not cov.get("users_lists", True):
+        c14_gate = ("unknown", "нет прав: нет доступа к базам клиентов" if cov.get("users_lists_no_access")
+                    else "списки баз клиентов не получены")
+    elif not lists:
         c14_gate = ("na", "пользовательских баз нет")
     elif not any(_date(u.get("updated")) for u in lists):
         c14_gate = ("unknown", "даты обновления баз не получены")
@@ -174,8 +177,11 @@ def run_checks(ds: dict, th: dict, findings: list, evaluated: dict | None = None
     content_gate = no_banners if no_banners[0] else (
         OK if any(b.get("content_ids") for b in banners) else _unknown("контент объявлений"))
     classified = any(b.get("ratios") or b.get("has_video") for b in banners)
-    by_rules("E1", "Все соотношения сторон 1:1, 4:5, 16:9, 9:16", ["missing_ratios"],
-             _first(content_gate, partial_gate, OK if classified else ("unknown", "форматы объявлений не определены")))
+    e1_gate = _first(content_gate, partial_gate, OK if classified else ("unknown", "форматы объявлений не определены"))
+    unread = sum(1 for b in banners if b.get("ratios_unknown"))
+    if not e1_gate[0] and unread and not fired.get("missing_ratios"):
+        e1_gate = ("unknown", f"соотношение сторон не читается из роли контента у {unread} объявлений")
+    by_rules("E1", "Все соотношения сторон 1:1, 4:5, 16:9, 9:16", ["missing_ratios"], e1_gate)
     by_rules("E2", "Видео используется", ["no_video"],
              _first(content_gate, partial_gate))
     by_rules("E3", "Креативов в группе 2–5", ["banners_per_group", "no_active_banners"],
@@ -183,7 +189,7 @@ def run_checks(ds: dict, th: dict, findings: list, evaluated: dict | None = None
     by_rules("E4", "Свежие креативы в топ-группах", ["stale_creatives"],
              _first(no_banners, partial_gate, ("unknown", "дата создания известна не у всех объявлений")
                     if any(b.get("age_days") is None for b in banners) else OK))
-    classified_banners = [b for b in banners if b.get("ratios") or b.get("has_video")]
+    classified_banners = [b for b in banners if (b.get("ratios") or b.get("has_video")) and not b.get("ratios_unknown")]
     e5_gate = _first(content_gate, partial_gate,
                      OK if len(classified_banners) >= 2 else ("unknown", "форматы определены меньше чем у двух объявлений"))
     if e5_gate[0]:
@@ -202,7 +208,9 @@ def run_checks(ds: dict, th: dict, findings: list, evaluated: dict | None = None
     # F
     by_rules("F1", "CTR не ниже 0,3 %", ["low_ctr"], no_stats)
     by_rules("F2", "Нет CPC-выбросов", ["cpc_outlier"], no_stats)
-    by_rules("F3", "Нет выгорания (частота)", ["burnout"], no_stats)
+    freq_gate = OK if any(g["stats"].get("frequency") for g in live if not g.get("stats_missing")) else (
+        "unknown", "частота за период не определена: охват и частота доступны только за всё время жизни группы")
+    by_rules("F3", "Нет выгорания (частота)", ["burnout"], _first(no_stats, freq_gate))
     long_enough = ds["period"]["days"] >= 30
     by_rules("F4", "Динамика CPA за 7 / 30 дней", ["cpa_trend"],
              no_stats if no_stats[0] else (OK if long_enough else ("unknown", "период аудита короче 30 дней")))

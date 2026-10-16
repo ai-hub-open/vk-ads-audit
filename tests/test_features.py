@@ -45,7 +45,8 @@ def test_content_191_is_not_169():
 
 
 def test_content_missing():
-    assert content_features(None) == {"ratios": [], "has_video": False, "content_ids": []}
+    assert content_features(None) == {"ratios": [], "has_video": False, "content_ids": [],
+                                          "ratios_unknown": False}
 
 
 def test_urls_and_text():

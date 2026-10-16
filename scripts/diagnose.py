@@ -79,8 +79,13 @@ def _active(g, th) -> bool:
     return g["status"] in th["active_statuses"]
 
 
+def is_live_group(g) -> bool:
+    """Не удалена и не в архиве (VK отдаёт архивные группы с issues [{"code": "ARCHIVED"}])."""
+    return g["status"] != "deleted" and "ARCHIVED" not in (g.get("issues") or [])
+
+
 def _live(ds):
-    return [g for g in ds["groups"] if g["status"] != "deleted"]
+    return [g for g in ds["groups"] if is_live_group(g)]
 
 
 def _measured(ds):
@@ -667,8 +672,9 @@ def _content_groups(ds, th):
 def missing_ratios(ds, th, ctx):
     out = []
     for g, active in _content_groups(ds, th):
-        if any(not b.get("content_ids") or not (b.get("ratios") or b.get("has_video")) for b in active):
-            continue   # не все объявления с контентом и классифицированы — «не проверено», молчим
+        if any(not b.get("content_ids") or not (b.get("ratios") or b.get("has_video")) or b.get("ratios_unknown")
+               for b in active):
+            continue   # не все объявления с контентом и классифицированы (или соотношение не читается) — молчим
         _seen(ctx, "missing_ratios")
         have = set().union(*(set(b.get("ratios") or []) for b in active))
         missing = [r for r in th["required_ratios"] if r not in have]

@@ -2,21 +2,21 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.normalize import (aggregate, build_dataset, check_sanity, kopecks_to_rub, main, money,
-                               stats_from, targeting_key)
+from scripts.normalize import (aggregate, build_dataset, check_sanity, main, money, stats_from,
+                               targeting_key)
 from scripts.raw_store import write_call
 
 P = {"date_from": "2026-09-01", "date_to": "2026-09-30", "metrics": "all"}
 
 
 def base(spent="0", shows=0, clicks=0, goals=0, ctr=None, vk_result=0):
-    ctr = (clicks / shows) if (ctr is None and shows) else (ctr or 0)
+    ctr = (clicks / shows * 100) if (ctr is None and shows) else (ctr or 0)   # ctr VK — уже проценты
     return {"base": {"spent": spent, "shows": shows, "clicks": clicks, "goals": goals, "ctr": ctr,
                      "vk": {"result": vk_result}},
             "uniques": {"reach": shows // 2, "frequency": 2.0 if shows else 0}}
 
 
-def cabinet(raw, groups, banners_by_group=None, summary=None, banner_summary=None, daily=None):
+def cabinet(raw, groups, banners_by_group=None, summary=None, banner_summary=None, daily=None, banner_daily=None):
     write_call(raw, "vk_ads_ad_plans_list", {"paginated": True}, {"items": [{"id": 7, "name": "План"}]})
     write_call(raw, "vk_ads_campaigns_list", {"paginated": True}, {"items": groups})
     for gid, banners in (banners_by_group or {}).items():
@@ -30,14 +30,15 @@ def cabinet(raw, groups, banners_by_group=None, summary=None, banner_summary=Non
     if daily is not None:
         write_call(raw, "vk_ads_statistics_day", {"entity": "campaigns", **P},
                    {"items": [{"id": k, "rows": rows} for k, rows in daily.items()]})
+    if banner_daily is not None:
+        write_call(raw, "vk_ads_statistics_day", {"entity": "banners", **P},
+                   {"items": [{"id": k, "rows": rows} for k, rows in banner_daily.items()]})
 
 
-def test_money_and_kopecks():
+def test_money():
     assert money("1234.50") == 1234.5
     assert money("1 234,5") == 1234.5
     assert money(None) == 0.0 and money("") == 0.0
-    assert kopecks_to_rub(6000000) == 60000.0
-    assert kopecks_to_rub(None) is None
     with pytest.raises(ValueError):
         money("abc")
 
@@ -70,7 +71,7 @@ def test_targeting_key_order_insensitive():
 def test_build_dataset(tmp_path):
     raw = tmp_path / "raw"
     groups = [{"id": 1, "name": "G1", "status": "active", "objective": "site_conversions",
-               "budget_limit_day": 50000, "issues": [{"code": "NO_MONEY"}],
+               "budget_limit_day": 500, "issues": [{"code": "NO_MONEY"}],
                "targetings": {"geo": {"regions": [1]}, "segments": [55]}},
               {"id": 2, "name": "G2", "status": "deleted", "objective": "site_conversions"}]
     cabinet(raw, groups, banners_by_group={1: [{"id": 11, "status": "active"}]},
@@ -83,7 +84,8 @@ def test_build_dataset(tmp_path):
     assert g["banner_ids"] == [11] and ds["banners"][0]["group_id"] == 1
     assert ds["totals"]["spent"] == 900.0
     assert ds["coverage"] == {"path": "B", "banners": True, "summary": True, "stats": True,
-                              "pixels": False, "metrika": False, "banner_groups": [1]}
+                              "pixels": False, "metrika": False, "banner_groups": [1],
+                              "users_lists": False, "users_lists_no_access": False}
     assert check_sanity(ds) == []
 
 
@@ -109,10 +111,11 @@ def test_daily_used_when_no_summary(tmp_path):
     assert ds["coverage"]["summary"] is False and ds["coverage"]["path"] == "A"
 
 
-def test_sanity_catches_ctr_in_percent(tmp_path):
+def test_sanity_catches_ctr_as_fraction(tmp_path):
+    """Живой прогон: ctr у VK уже в процентах (0.5176 = 0,52 %); доля 0.01 вместо 1.0 — формат поменялся."""
     raw = tmp_path / "raw"
     cabinet(raw, [{"id": 1, "name": "G1", "status": "active"}],
-            summary={1: base(spent="100", shows=10000, clicks=100, ctr=1.0)})  # 1.0 = «процент», а не доля
+            summary={1: base(spent="100", shows=10000, clicks=100, ctr=0.01)})
     issues = check_sanity(build_dataset(raw, "2026-09-01", "2026-09-30"))
     assert [i["code"] for i in issues] == ["ctr_units"]
 
@@ -150,7 +153,7 @@ def test_reversed_period_raises(tmp_path):
 def test_sanity_catches_ctr_units_in_daily_only(tmp_path):
     """Путь A: только daily — проверка единиц должна работать и по строкам дней."""
     raw = tmp_path / "raw"
-    rows = [{"date": "2026-09-01", **base(spent="100", shows=1000, clicks=10, ctr=1.0)}]  # 1.0 = «процент»
+    rows = [{"date": "2026-09-01", **base(spent="100", shows=1000, clicks=10, ctr=0.01)}]  # доля вместо процентов
     cabinet(raw, [{"id": 1, "name": "G1", "status": "active"}], daily={1: rows})
     issues = check_sanity(build_dataset(raw, "2026-09-01", "2026-09-30", path="A"))
     assert [(i["code"], i["entity"]) for i in issues] == [("ctr_units", "group:1@2026-09-01")]
@@ -175,7 +178,7 @@ def test_cli_good_cabinet_writes_dataset_only(tmp_path):
 def test_cli_sanity_failure_writes_sanity_only(tmp_path):
     ws = tmp_path / "ws"
     cabinet(ws / "raw", [{"id": 1, "name": "G1", "status": "active"}],
-            summary={1: base(spent="100", shows=10000, clicks=100, ctr=1.0)})
+            summary={1: base(spent="100", shows=10000, clicks=100, ctr=0.01)})
     assert _ws_run(ws) == 3
     assert (ws / "sanity.json").exists() and not (ws / "dataset.json").exists()
 
@@ -261,15 +264,17 @@ def test_group_not_covered_anywhere_is_stats_missing(tmp_path):
     assert "Статистика не получена для 1 групп — итоги и выводы по ним неполные." in ds["notes"]
 
 
-def test_sanity_summary_vs_daily(tmp_path):
+def test_summary_all_time_does_not_block_audit(tmp_path):
+    """statistics_summary игнорирует период (баг MCP): итоги берём из дней, расхождение — не код 3."""
     raw = tmp_path / "raw"
     cabinet(raw, [_active(1)])
     _stat_call(raw, "vk_ads_statistics_summary", "campaigns", [1],
                [{"id": 1, "total": base(spent="1000", shows=1000, clicks=10)}])
     rows = [{"date": "2026-09-01", **base(spent="400", shows=1000, clicks=10)}]
     _stat_call(raw, "vk_ads_statistics_day", "campaigns", [1], [{"id": 1, "rows": rows}])
-    issues = check_sanity(build_dataset(raw, "2026-09-01", "2026-09-30"))
-    assert "summary_vs_daily" in [i["code"] for i in issues]
+    ds = build_dataset(raw, "2026-09-01", "2026-09-30")
+    assert ds["groups"][0]["stats"]["spent"] == 400.0 and ds["totals"]["spent"] == 400.0
+    assert check_sanity(ds) == []
 
 
 def test_identical_duplicate_listing_is_deduped(tmp_path):
@@ -418,7 +423,7 @@ def test_plan_budget_known(tmp_path):
     raw = tmp_path / "raw"
     cabinet(raw, [])
     write_call(raw, "vk_ads_ad_plans_list", {"paginated": True},
-               {"items": [{"id": 8, "name": "P", "budget_limit_day": 300000}, {"id": 9, "name": "Q"}]})
+               {"items": [{"id": 8, "name": "P", "budget_limit_day": 3000}, {"id": 9, "name": "Q"}]})
     plans = {p["id"]: p for p in build_dataset(raw, "2026-09-01", "2026-09-30")["plans"]}
     assert plans[8]["has_budget"] is True and plans[8]["budget_day_rub"] == 3000.0
     assert plans[9]["has_budget"] is False

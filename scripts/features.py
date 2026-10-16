@@ -88,7 +88,9 @@ def _ratio_of(role: str):
 
 
 def content_features(content) -> dict:
-    ratios, video, ids = set(), False, []
+    """ratios_unknown — есть роль image/video, из имени которой соотношение сторон не прочитать
+    (например video_landscape_180s): форматы такого объявления неизвестны, а не «отсутствуют»."""
+    ratios, video, ids, unknown = set(), False, [], False
     for role, item in (content.items() if isinstance(content, dict) else []):
         r = str(role).lower()
         video = video or r.startswith("video")
@@ -98,11 +100,12 @@ def content_features(content) -> dict:
             continue
         value = _ratio_of(r)
         if value is None:
+            unknown = True
             continue
         for name, target in RATIOS.items():
             if abs(value - target) / target <= RATIO_TOL:
                 ratios.add(name)
-    return {"ratios": sorted(ratios), "has_video": video, "content_ids": ids}
+    return {"ratios": sorted(ratios), "has_video": video, "content_ids": ids, "ratios_unknown": unknown}
 
 
 def url_strings(v) -> list:

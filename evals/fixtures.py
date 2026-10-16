@@ -1,4 +1,6 @@
-"""Синтетические кабинеты VK в формате raw/ (как отдаёт vk-ads-mcp 0.11.0)."""
+"""Синтетические кабинеты VK в формате raw/ (как отдаёт vk-ads-mcp 0.11.0, формы подтверждены живым прогоном 16.10.2026):
+бюджеты — рубли, ctr — проценты, итоги периода — сумма statistics_day (по группам и объявлениям), statistics_summary —
+за всё время (нужна только ради охвата и частоты групп, созданных внутри периода)."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -11,13 +13,13 @@ DAYS = [f"2026-09-{d:02d}" for d in range(1, 31)]
 
 def block(spent, shows, clicks, goals, frequency=2.0):
     return {"base": {"spent": f"{spent:.2f}", "shows": shows, "clicks": clicks, "goals": goals,
-                     "ctr": (clicks / shows) if shows else 0, "vk": {"result": 0}},
+                     "ctr": (clicks / shows * 100) if shows else 0, "vk": {"result": 0}},
             "uniques": {"reach": int(shows / frequency) if shows else 0, "frequency": frequency if shows else 0}}
 
 
-def group(gid, regions, budget_kop=200000, status="active", created="2026-08-01 10:00:00", **kw):
+def group(gid, regions, budget_rub=2000, status="active", created="2026-08-01 10:00:00", **kw):
     g = {"id": gid, "name": f"Группа {gid}", "status": status, "objective": "site_conversions",
-         "package_id": 3217, "ad_plan_id": 1, "budget_limit_day": budget_kop, "issues": [],
+         "package_id": 3217, "ad_plan_id": 1, "budget_limit_day": budget_rub, "issues": [],
          "created": created, "delivery": "delivering", "autobidding_mode": None,
          "targetings": {"geo": {"regions": regions}, "sex": ["male", "female"]}}
     g.update(kw)
@@ -43,7 +45,7 @@ def write_cabinet(raw: Path, groups, banners_by_group, per_day, pixels=1, segmen
     write_call(raw, "vk_ads_remarketing_pixels_list", {"paginated": True},
                {"items": [{"id": i, "name": "pixel"} for i in range(pixels)]})
     live = [g["id"] for g in groups if g["status"] != "deleted"]
-    summary, daily, bsum = [], [], []
+    summary, daily, bdaily = [], [], []
     for gid in live:
         spec = per_day.get(gid, (0, 0, 0, 0))
         days = spec if isinstance(spec, list) else [spec] * len(DAYS)
@@ -54,13 +56,14 @@ def write_cabinet(raw: Path, groups, banners_by_group, per_day, pixels=1, segmen
         bs = banners_by_group.get(gid, [])
         for b in bs:
             share = 1 / len(bs)
-            bsum.append({"id": b["id"], "total": block(tot[0] * share, int(tot[1] * share), int(tot[2] * share),
-                                                       int(tot[3] * share), frequency=freq)})
+            bdaily.append({"id": b["id"], "rows": [
+                {"date": d, **block(v[0] * share, int(v[1] * share), int(v[2] * share), int(v[3] * share),
+                                    frequency=freq)} for d, v in zip(DAYS, days)]})
     write_call(raw, "vk_ads_statistics_summary", {"entity": "campaigns", "ids": ",".join(map(str, live)), **P},
                {"items": summary})
     write_call(raw, "vk_ads_statistics_day", {"entity": "campaigns", "ids": ",".join(map(str, live)), **P},
                {"items": daily})
-    write_call(raw, "vk_ads_statistics_summary", {"entity": "banners", **P}, {"items": bsum})
+    write_call(raw, "vk_ads_statistics_day", {"entity": "banners", **P}, {"items": bdaily})
 
 
 FREQ6: set = set()   # группы с частотой 6 (красное выгорание) — заполняет кабинет expert_1
@@ -82,9 +85,9 @@ def _good_banners(gid, prefix):
 
 def healthy(raw: Path) -> dict:
     FREQ6.clear()
-    plans = [{"id": 1, "name": "ретарг_сайт_Мск", "budget_limit_day": 300000},
-             {"id": 2, "name": "LAL_клиенты_Мск", "budget_limit_day": 300000},
-             {"id": 3, "name": "холод_интересы_Мск", "budget_limit_day": 300000}]
+    plans = [{"id": 1, "name": "ретарг_сайт_Мск", "budget_limit_day": 3000},
+             {"id": 2, "name": "LAL_клиенты_Мск", "budget_limit_day": 3000},
+             {"id": 3, "name": "холод_интересы_Мск", "budget_limit_day": 3000}]
     segs = [{"id": 101, "name": "Посетители сайта 30 дней"}, {"id": 102, "name": "LAL на клиентов 3%", "size": 120},
             {"id": 601, "name": "Клиенты — исключение",
              "relations": [{"object_type": "remarketing_users_list", "object_id": 601}]}]
@@ -125,7 +128,7 @@ def leaking(raw: Path) -> dict:
 
 def hygiene(raw: Path) -> dict:
     FREQ6.clear()
-    groups = [group(1, [1], budget_kop=20000),                       # 200 ₽ < 300
+    groups = [group(1, [1], budget_rub=200),                         # 200 ₽ < 300
               group(2, [5]), group(3, [5]),                          # одинаковый таргетинг
               group(4, [4], created="2026-01-10 00:00:00"),          # старая, без показов
               group(5, [6])]                                         # одно объявление
@@ -173,8 +176,9 @@ def expert_1(raw: Path) -> dict:
               group(3, [5506], ad_plan_id=2, name="Группа 3", targetings={"geo": {"regions": [5506]}, "segments": [501]}),
               group(4, [5506], ad_plan_id=2, name="Группа 4", targetings={"geo": {"regions": [5506]}, "segments": [501]},
                     max_price="50.00"),
-              group(9, [5506], ad_plan_id=2, name="Группа 9", targetings={"geo": {"regions": [5506]}, "interests": [7]})]
-    groups += [group(20 + i, [5506 + i], ad_plan_id=2, name=f"Группа {20 + i}", budget_kop=15000,
+              group(9, [5506], ad_plan_id=2, name="Группа 9", created="2026-09-01 08:00:00",    # жизнь целиком в периоде → частота известна
+                    targetings={"geo": {"regions": [5506]}, "interests": [7]})]
+    groups += [group(20 + i, [5506 + i], ad_plan_id=2, name=f"Группа {20 + i}", budget_rub=150,
                      targetings={"geo": {"regions": [5506 + i]}, "interests": [i]}) for i in range(10)]
     for g in groups:
         g["enable_utm"] = False                                           # авто-UTM выключена, в ссылках меток нет
