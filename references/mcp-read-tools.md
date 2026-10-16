@@ -6,9 +6,11 @@
 ## Порядок сбора (путь A повторяет его руками)
 
 **Предполётка (до сбора):** `vk_ads_auth_check`, `vk_ads_account_info` (id пользователя), затем один вызов
-`vk_ads_statistics_day(entity="users", ids=<id пользователя>, date_from, date_to)`. Расход за период 0 — сказать
-пользователю сразу и предложить другой период или кабинет; собирать нечего. Путь B делает это сам (код выхода 5), в
-`raw/` предполётка не пишется.
+`vk_ads_statistics_day(entity="users", ids=<id пользователя>, date_from, date_to, metrics=base)`. Расход за период 0 и нет
+живых групп (видно из `vk_ads_campaigns_list`) — сказать пользователю и не собирать; живые группы есть — собирать, отчёт
+выйдет с плашкой «0 ₽». Путь B делает это сам (код выхода 5, расход — `preflight_spent` в `collect_log.json`, в `raw/`
+предполётка не пишется); на пути A ответ предполётки кладётся в `raw/` обычным файлом `vk_ads_statistics_day__NNN.json`
+с `entity: "users"` — по нему плашка отличает «кабинет потратил 0 ₽» от «0 ₽ у живых групп».
 
 Формат файла в `raw/` — `<инструмент>__<NNN>.json` = `{"tool", "arguments", "response"}`; `NNN` — целое число.
 В `raw/` других файлов быть не должно, проверка — `python -m scripts.raw_store check --workspace <ws>`.
@@ -19,14 +21,14 @@
 |---|---|---|---|
 | 1 | `vk_ads_ad_plans_list` | `fields=id,name,status,objective,budget_limit,budget_limit_day,date_start,date_end,created,updated`, `limit=250`, `offset` | `vk_ads_ad_plans_list__NNN.json` |
 | 2 | `vk_ads_campaigns_list` | `fields=id,name,status,objective,package_id,ad_plan_id,budget_limit,budget_limit_day,targetings,issues,created,updated,date_start,date_end,delivery,autobidding_mode,max_price,priced_goal,enable_utm,utm` | `vk_ads_campaigns_list__NNN.json` |
-| 3 | `vk_ads_banners_list` | `campaign_id=<группа>`, `fields=id,name,campaign_id,status,moderation_status,moderation_reasons,issues,delivery,textblocks,urls,content,created,updated,user_can_request_remoderation,call_to_action,ord_marker` | по файлу на группу |
+| 3 | `vk_ads_banners_list` | `campaign_id=<группа>`, `fields=id,name,campaign_id,status,moderation_status,moderation_reasons,issues,delivery,textblocks,urls,content,created,updated,user_can_request_remoderation,call_to_action,ord_marker,or_status` | по файлу на группу |
 | 4 | `vk_ads_remarketing_segments_list`, `vk_ads_users_lists_list`, `vk_ads_remarketing_pixels_list` | — | по файлу |
-| 5 | `vk_ads_statistics_day` | `entity=campaigns`, `ids` ≤ 50 через запятую (все группы, кроме удалённых), `date_from`, `date_to`, `metrics=all` | по файлу на пачку |
-| 6 | `vk_ads_statistics_day` | `entity=banners`, `ids` объявлений (≤ 50 в пачке) | по файлу на пачку |
-| 7 | `vk_ads_statistics_summary` | `entity=campaigns`, как в шаге 5 — **необязательно**: охват и частота только у групп, созданных внутри периода | по файлу на пачку |
+| 5 | `vk_ads_statistics_day` | `entity=campaigns`, `ids` ≤ 50 через запятую (все группы, кроме удалённых), `date_from`, `date_to`, `metrics=base` | по файлу на пачку |
+| 6 | `vk_ads_statistics_day` | `entity=banners`, `ids` объявлений (≤ 50 в пачке), `date_from`, `date_to`, `metrics=base` | по файлу на пачку |
+| 7 | `vk_ads_statistics_summary` | `entity=campaigns`, `ids` как в шаге 5, `metrics=base,uniques`, **без `date_from` / `date_to`** — **необязательно**: охват и частота только у групп, созданных внутри периода | по файлу на пачку |
 
 Итоги периода (расход, показы, клики, конверсии) считаются **суммой строк `statistics_day`**: `statistics_summary`
-игнорирует `date_from` / `date_to` и отдаёт всё время (баг MCP, передан платформе). Поэтому и у групп, и у объявлений
+отдаёт итоги только за всё время, даты в неё не передаются (с `date_from` / `date_to` MCP отказывает). Поэтому и у групп, и у объявлений
 итоги берутся из дней (шаги 5 и 6); сводка нужна лишь ради охвата и частоты, и скрипты берут их только у групп, чья
 жизнь целиком в периоде (создана не раньше `date_from`, показы сводки совпадают с суммой дней). У остальных частота —
 «не определена», правила выгорания молчат, а в «Ограничениях» появляется строка. Старые `raw/` со сводками объявлений
@@ -44,7 +46,7 @@
 Без `fields` списки отдают только `id`, `name`, `package_id`. Неизвестное имя в `fields` сервер отвергает ошибкой
 `400 unknown_resource_fields` (живой прогон 16.10.2026). Поэтому путь B (`scripts/collect.py`) просит расширенный
 список (`GROUP_FIELDS`, `BANNER_FIELDS` — к `GROUP_FIELDS_BASE`, `BANNER_FIELDS_BASE` добавлены `enable_utm`, `utm`,
-`call_to_action`, `ord_marker`) и при ошибке ответа повторяет вызов один раз с базовым списком; оба вызова остаются в
+`call_to_action`, `ord_marker`, `or_status`) и при ошибке ответа повторяет вызов один раз с базовым списком; оба вызова остаются в
 `collect_log.json`. На пути A — те же расширенные строки; отказал сервер — повтори с базовыми.
 
 `vk_ads_packages_list` (обновление сервера 2026-10-14) по умолчанию отдаёт только пакеты, на которых можно
@@ -56,7 +58,8 @@
 - Списки: `{"count"?, "items": [...], "offset"?}` — `count` бывает не у всех.
 - Статистика: `{"items": [{"id", "total": {"base": {...}, "uniques": {...}, ...}, "rows"?: [{"date", "base", ...}]}], "total": {...}}`;
   `rows` — только у `statistics_day`. Сущностей без показов в `items` может не быть — это нули.
-  `statistics_summary` игнорирует период (всё время), `statistics_day` его уважает; глубина дневной истории 366 дней.
+  `statistics_summary` — только за всё время (без дат), `statistics_day` — за период; глубина дневной истории 366 дней.
+  У `metrics=base` блока `uniques` нет: охват и частота дней — «не определены» (`None`), а не 0.
 - `base`: `shows`, `clicks`, `goals`, `spent` (строка, ₽), `cpm`/`cpc`/`cpa` (строки), `ctr`/`cr` — **уже проценты**
   (608 кликов на 117 469 показов → `ctr: 0.5176` = 0,52 %), `vk.{goals,result,cpa,cr,cpr}`.
 - `uniques`: `reach`, `frequency`.
@@ -71,8 +74,10 @@
 
 - `budget_limit` / `budget_limit_day` — рубли: 50000 в API = «50 000 ₽» в день в интерфейсе, 500 = 500 ₽.
 - `ctr` и `cr` в статистике — уже проценты; деньги в статистике — строки в рублях.
-- `vk_ads_statistics_summary` игнорирует `date_from` / `date_to` и отдаёт итоги за всё время (баг MCP, передан
-  платформе); `vk_ads_statistics_day` период уважает. Итоги периода — сумма дней (для объявлений — `entity=banners`).
+- `vk_ads_statistics_summary` отдаёт итоги только за всё время; с `date_from` / `date_to` MCP теперь отказывает понятной
+  ошибкой — даты в сводку не передаются. Период — только `vk_ads_statistics_day` (итог в `total`). Итоги периода — сумма
+  дней (для объявлений — `entity=banners`).
+- `metrics="base"` и `metrics="base,uniques"` принимаются (вместо тяжёлого `all`): дни — `base`, сводка — `base,uniques`.
 - Глубина дневной статистики 366 дней (окно включает сегодня). MCP отказывает сам до обращения к VK: «доступен период с
   2025-10-16 по 2026-10-16 … Укажите date_from не раньше 2025-10-16»; старый ответ VK — `400 WRONG_DATE: minimal allowed date
   is '2025-8-11'`. Скрипты разбирают дату из обоих текстов.
@@ -81,12 +86,17 @@
   "total": {"base": {...}}}`; предполётка читает `items[].total.base.spent` (строка).
 - Поле группы `auto_utm` → `400 unknown_resource_fields`; приходят `enable_utm` (bool) и `utm` (у удалённой группы null).
 - Поля объявления `erid`, `ord_token`, `ord_erid` → 400; маркировка ОРД лежит в `ord_marker` (строка, например `2VtzquiRr5b`).
+  `or_status` (статус ОРД) — тоже допустимое поле; что значат его значения, не подтверждено: скрипты его сохраняют
+  (`ord_status` в `dataset.json`) и показывают в отчёте справочно, в проверку A2 он не идёт.
 - `vk_ads_users_lists_list` → HTTP 429 с `limits: {"1": 0}`: у подключения нет прав на базы клиентов, повтор бесполезен.
 - Сегменты приходят только с `id, name, pass_condition, flags, created, updated` — без `size` и без `relations` (дефект MCP):
   размер LAL-сегментов и связь база → сегмент недоступны.
 - Группа: `utm` — строка-шаблон UTM (`utm_source=vk_ads&utm_medium=cpa&utm_campaign=…&utm_term={{gender}}_{{age}}`) или null;
-  `enable_utm: true` приходит только у части групп, у остальных ключ опущен (нет ключа = выключено). Группа считается
-  размеченной при `enable_utm` true или непустом `utm`.
+  `enable_utm: true` приходит только у части групп, у остальных ключ опущен. Группа считается размеченной при `enable_utm`
+  true или непустом `utm`; что отсутствие ключа значит «выключено», методист подтвердить не смогла (второй прогон
+  16.10.2026) — такая группа «не подтверждена» (`auto_utm` None), A3 по ней не ставит ❌.
+- `autobidding_mode: second_price_mean` — **ручная ставка**: ставка лежит в `price`, списывается фактический CPM; это не
+  автостратегия.
 - `call_to_action` у всех объявлений кабинета — `null`; роли контента вида `video_landscape_180s` (соотношения сторон в
   имени нет); удалённые и архивные группы приходят с `issues: [{"code": "ARCHIVED"}]`.
 - В claude.ai и Claude Desktop у коннектора vk-ads нет персональной ссылки подключения — сбор всегда идёт путём A.
@@ -98,8 +108,8 @@
 - Допуск проверки `ctr_units` (`check_sanity`) против округления `ctr` на стороне VK.
 - Сколько `ids` принимает один вызов статистики (сейчас пачки по 50).
 - Имена полей объявления: `moderation_status`, `moderation_reasons`, `user_can_request_remoderation`.
-- Реальный набор значений `autobidding_mode`: пока виден только `max_goals`; значение ручного режима неизвестно
-  (автостратегия определяется по списку `auto_bidding_modes` в `thresholds.json`).
+- Реальный набор значений `autobidding_mode`: видны `max_goals` (автостратегия) и `second_price_mean` (ручная ставка,
+  подтверждено 16.10.2026); другие значения — неизвестны (`auto_bidding_modes` и `manual_bidding_modes` в `thresholds.json`).
 - Сервер stateless (tools/call без initialize; живой probe 2026-10-14, `Mcp-Session-Id` не выдаётся) — если probe
   начнёт падать с ошибкой сессии, нужен handshake в `mcp_client`.
 - Удалённые объявления в `banners_list` отдаются? (от этого зависит, насколько сумма по объявлениям меньше расхода группы).
@@ -123,6 +133,7 @@
 | корректировки по устройствам | `DEVICE_ADJ_KEYS` | `device_bid_adjustments`, `mobile_bid_adjustments` | `targetings` группы |
 | корректировки по полу и возрасту | `DEMO_ADJ_KEYS` | `demography_bid_adjustments`, `sex_age_bid_adjustments` | `targetings` группы |
 | маркировка ОРД | `ERID_KEYS` | `ord_marker` | объявление (подтверждено) |
+| статус ОРД (справочно) | `ORD_STATUS_KEYS` | `or_status` | объявление (поле подтверждено, смысл значений — нет) |
 | авто-UTM | `AUTO_UTM_KEYS` | `enable_utm` | группа (подтверждено) |
 | бюджет кампании (CBO) | `PLAN_BUDGET_KEYS` | `budget_limit`, `budget_limit_day` | кампания (`ad_plan`) |
 | размер сегмента, базы | `SIZE_KEYS` | `size`, `count`, `entries_count`, `audience_size` | сегмент, пользовательская база |

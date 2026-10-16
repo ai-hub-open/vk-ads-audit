@@ -132,7 +132,8 @@ def test_skill_documents_live_run_fixes():
     assert 'entity="users"' in SKILL and "кодом 5" in SKILL and "| 5 |" in SKILL
     assert "raw_store import" in SKILL and "--arguments-file" in SKILL
     assert '"no_access": true' in SKILL and "~366 дней" in SKILL
-    assert "игнорирует даты" in SKILL and "суммой дней" in SKILL
+    # Второй живой прогон: сводка не «игнорирует даты», а только за всё время — с датами MCP теперь отказывает.
+    assert "даты не передавай" in SKILL and "суммой дней" in SKILL
     tools, lim, rules, log = (_ref("mcp-read-tools.md"), _ref("limitations.md"),
                               _ref("diagnostic-rules.md"), (SKILL_ROOT / "CHANGELOG.md").read_text(encoding="utf-8"))
     assert "Подтверждено 16.10.2026" in tools and "`ord_marker`" in tools and "`utm`" in tools

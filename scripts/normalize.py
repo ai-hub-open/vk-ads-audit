@@ -4,10 +4,15 @@ normalize.py — raw/ → dataset.json. Единицы приводятся ТО
 - бюджеты групп и кампаний приходят в рублях (подтверждено живым прогоном: 50000 = «50 000 ₽» в кабинете);
 - деньги статистики — строками в рублях;
 - CTR считаем сами из clicks/shows, значение VK (оно уже в процентах) храним для проверки единиц;
-- итоги периода — сумма строк statistics_day: statistics_summary игнорирует период и отдаёт всё время
-  (баг MCP), поэтому охват и частота берутся из сводки только для групп, чья жизнь целиком в периоде;
+- итоги периода — сумма строк statistics_day: statistics_summary отдаёт только всё время (даты в неё не передаются),
+  поэтому охват и частота берутся из сводки только для групп, чья жизнь целиком в периоде;
+- metrics=base у дней: блока uniques нет — охват и частота «не определены» (None), а не 0;
 - конверсии: base.goals, для целей из CONVERSION_SOURCE — base.vk.result.
 Проверка здравого смысла (check_sanity) останавливает аудит на кривых числах.
+Нулевой расход (spend_state): нет живых групп и расхода нет — код 5, dataset.json не пишется (аудит строить не на чем;
+статистика по архивным не получена — код 3, «статистика не получена»); живые группы есть, их расход известен и равен 0 —
+dataset.json с zero_spend: отчёт выйдет с плашкой. account_spent — расход всего кабинета из предполётки
+(collect_log.preflight_spent на пути B, файл statistics_day entity=users в raw/ на пути A) или None.
 
     python -m scripts.normalize --workspace <абс. путь> --date-from D --date-to D [--target-cpa N] [--path A|B]
 """
@@ -24,19 +29,23 @@ from pathlib import Path
 try:
     from scripts._console import setup_console
     from scripts._workspace import resolve_workspace
-    from scripts.features import (AUTO_UTM_KEYS, ERID_KEYS, EXCLUDE_KEYS, PLAN_BUDGET_KEYS, SIZE_KEYS, UPDATED_KEYS,
+    from scripts.features import (AUTO_UTM_KEYS, ERID_KEYS, EXCLUDE_KEYS, ORD_STATUS_KEYS, PLAN_BUDGET_KEYS, SIZE_KEYS,
+                                  UPDATED_KEYS, plural,
                                   SEGMENT_RELATION_KEYS, banner_text, content_features, first_known, is_lal,
                                   is_live_group, layer_of, observed_keys, parse_dt, targeting_features,
                                   url_strings, users_list_ids)
-    from scripts.raw_store import items_of, read_calls
+    from scripts.collect import total_spend
+    from scripts.raw_store import items_of, mark_recovered, read_calls
 except ImportError:  # запуск напрямую
     from _console import setup_console
     from _workspace import resolve_workspace
-    from features import (AUTO_UTM_KEYS, ERID_KEYS, EXCLUDE_KEYS, PLAN_BUDGET_KEYS, SIZE_KEYS, UPDATED_KEYS,
+    from features import (AUTO_UTM_KEYS, ERID_KEYS, EXCLUDE_KEYS, ORD_STATUS_KEYS, PLAN_BUDGET_KEYS, SIZE_KEYS,
+                          UPDATED_KEYS, plural,
                           SEGMENT_RELATION_KEYS, banner_text, content_features, first_known, is_lal,
                           is_live_group, layer_of, observed_keys, parse_dt, targeting_features,
                           url_strings, users_list_ids)
-    from raw_store import items_of, read_calls
+    from collect import total_spend
+    from raw_store import items_of, mark_recovered, read_calls
 
 CONVERSION_SOURCE = {"leadads": "vk.result", "socialengagement": "vk.result"}
 NOT_TARGETING = ("fulltime",)
@@ -86,7 +95,8 @@ def stats_from(block, objective) -> dict:
     return {"spent": spent, "shows": shows, "clicks": clicks, "conversions": conv,
             **_ratios(spent, shows, clicks, conv),
             "vk_ctr_pct": None if b.get("ctr") in (None, "") else round(float(b["ctr"]), 4),   # у VK уже проценты
-            "reach": int(u.get("reach") or 0), "frequency": float(u.get("frequency") or 0) or None}
+            "reach": None if u.get("reach") in (None, "") else int(u["reach"]),   # нет uniques — нет данных, не 0
+            "frequency": float(u.get("frequency") or 0) or None}
 
 
 def aggregate(rows: list) -> dict:
@@ -95,7 +105,7 @@ def aggregate(rows: list) -> dict:
     clicks = sum(r["clicks"] for r in rows)
     conv = sum(r["conversions"] for r in rows)
     return {"spent": spent, "shows": shows, "clicks": clicks, "conversions": conv,
-            **_ratios(spent, shows, clicks, conv), "vk_ctr_pct": None, "reach": 0, "frequency": None}
+            **_ratios(spent, shows, clicks, conv), "vk_ctr_pct": None, "reach": None, "frequency": None}
 
 
 def _canon(v):
@@ -241,14 +251,16 @@ def _blind_ids(raw_dir: Path, tool: str, keys) -> set:
 
 
 def _auto_utm(g, observed):
-    """Группа размечена: enable_utm true или в utm непустой шаблон (живой прогон: ключ enable_utm у части групп
-    опущен — отсутствие = выключено, если ключ встречался у других)."""
+    """True — группа размечена: enable_utm true или в utm непустой шаблон; False — только явный enable_utm false;
+    None — ключа нет и шаблона нет. Живой прогон: enable_utm приходит только со значением true, у остальных групп ключ
+    опущен, а что это «выключено» — не подтверждено (второй прогон 16.10.2026): правило utm_missing по None молчит."""
     utm = g.get("utm")
     if isinstance(utm, str) and utm.strip():
         return True
     if not any(k in observed for k in AUTO_UTM_KEYS):
         return None
-    return bool(first_known(g, AUTO_UTM_KEYS, observed))
+    flag = next((g[k] for k in AUTO_UTM_KEYS if g.get(k) is not None), None)
+    return None if flag is None else bool(flag)
 
 
 WINDOWS = (7, 14, 30)
@@ -280,9 +292,33 @@ def _lifetime_fits(g: dict, d_from: date, period_stats: dict, summary_stats: dic
     return abs(total - shows) <= max(10, 0.01 * shows)
 
 
+def _account_spent(raw_dir: Path, period: tuple, collect_log):
+    """Расход всего кабинета за период (предполётка): путь A — ответ statistics_day(entity=users) в raw/,
+    путь B — preflight_spent в collect_log.json. None — не проверялся или не прочитан: это не «0 ₽»."""
+    users = [c for c in read_calls(raw_dir, "vk_ads_statistics_day") if c["arguments"].get("entity") == "users"]
+    if users:
+        got = []
+        for c in users:
+            args = c["arguments"]
+            if (args.get("date_from"), args.get("date_to")) != period:
+                return None   # предполётка за другой период — расход кабинета неизвестен
+            v = total_spend(c["response"])   # та же логика, что у предполётки пути B
+            if v is None:
+                return None
+            got.append(v)
+        return round(sum(got), 2)
+    v = (collect_log or {}).get("preflight_spent")
+    return None if v is None or isinstance(v, bool) else round(float(v), 2)
+
+
+def _groups_gen(n: int) -> str:
+    """«для 1 группы», «для 5 групп»."""
+    return f"{n} {plural(n, 'группы', 'групп', 'групп')}"
+
+
 def _no_access_to_lists(collect_log) -> bool:
     return any(c.get("tool") == "vk_ads_users_lists_list" and not c.get("ok", True) and c.get("no_access")
-               for c in (collect_log or {}).get("calls", []))
+               and not c.get("recovered") for c in (mark_recovered(collect_log) or {}).get("calls", []))
 
 
 def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, path: str = "B",
@@ -324,6 +360,7 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
     segments_by_id = {s.get("id"): s for s in seg_items}
     observed_b = observed_keys(banners)
     erid_blind = _blind_ids(raw_dir, "vk_ads_banners_list", ERID_KEYS)
+    ord_status_blind = _blind_ids(raw_dir, "vk_ads_banners_list", ORD_STATUS_KEYS)
     utm_blind = _blind_ids(raw_dir, "vk_ads_campaigns_list", AUTO_UTM_KEYS)
 
     objective_of: dict = {}
@@ -392,6 +429,10 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
             "age_days": (d_to - parse_dt(b["created"]).date()).days if parse_dt(b.get("created")) else None,
             "erid": (None if b["id"] in erid_blind or not any(k in observed_b for k in ERID_KEYS)
                      else str(first_known(b, ERID_KEYS, observed_b) or "")),
+            # статус ОРД — только справочно: смысл значений or_status не подтверждён, в проверку A2 не идёт
+            "ord_status": (None if b["id"] in ord_status_blind
+                           or first_known(b, ORD_STATUS_KEYS, observed_b) in (None, "")
+                           else str(first_known(b, ORD_STATUS_KEYS, observed_b))),
             "stats": bstats,
         })
 
@@ -400,10 +441,10 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
     if banner_calls:
         uncovered = [g for g in live_groups if g["status"] == "active" and g["id"] not in banner_groups]
         if uncovered:
-            notes.append(f"Объявления не собраны для {len(uncovered)} групп — по ним выводы на уровне группы.")
+            notes.append(f"Объявления не собраны для {_groups_gen(len(uncovered))} — по ним выводы на уровне группы.")
     absent = [g for g in live_groups if g.get("stats_missing")]
     if absent:
-        notes.append(f"Статистика не получена для {len(absent)} групп — итоги и выводы по ним неполные.")
+        notes.append(f"Статистика не получена для {_groups_gen(len(absent))} — итоги и выводы по ним неполные.")
     by_id = {b["id"]: b for b in banner_out}
     for g in live_groups:
         bs = [by_id[i]["stats"] for i in g["banner_ids"] if by_id[i]["stats"]]
@@ -415,7 +456,7 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
 
     no_freq = [g for g in live_groups if g["id"] in unmeasured_freq and g["stats"]["shows"] > 0]
     if no_freq:
-        notes.append(f"Частота и охват за период не определены для {len(no_freq)} групп: статистика VK отдаёт их "
+        notes.append(f"Частота и охват за период не определены для {_groups_gen(len(no_freq))}: статистика VK отдаёт их "
                      "только за всё время жизни группы — правила по частоте (выгорание) по ним не применялись.")
 
     def named(tool):
@@ -464,13 +505,60 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
         "as_of": as_of or datetime.now().isoformat(timespec="minutes"),
         "totals_windows": windows_of([r for g in counted for r in g["daily"]], d_from, d_to),
         "notes": notes,
+        # расход живых групп известен (статистика есть по всем) и равен 0 — отчёт с плашкой; архивные не в счёт
+        "zero_spend": bool(live_groups and has_stats and not absent
+                           and aggregate([g["stats"] for g in live_groups])["spent"] == 0),
+        "account_spent": _account_spent(raw_dir, period, collect_log),
         "coverage": {"path": path, "banners": bool(banner_calls),
                      "banner_groups": sorted(banner_groups, key=lambda x: (str(type(x)), x)),
                      "summary": bool(summary_calls), "stats": has_stats,
                      "users_lists": lists_collected, "users_lists_no_access": lists_no_access,
                      "pixels": bool(read_calls(raw_dir, "vk_ads_remarketing_pixels_list")),
+                     "preflight_no_spend": bool((collect_log or {}).get("no_spend")),
                      "metrika": False},
     }
+
+
+def spend_state(ds: dict) -> str:
+    """idle — нет живых групп (все удалены или в архиве) и расхода нет: аудит строить не на чем;
+    no_stats — живых групп нет, а статистика по архивным не получена: «расхода нет» сказать нельзя;
+    zero_spend — живые группы есть, их расход за период известен и равен 0; ok — остальное."""
+    if not any(_is_live(g) for g in ds["groups"]):
+        if ds["coverage"].get("preflight_no_spend"):   # сбор сам остановился: 0 ₽ и живых групп нет
+            return "idle"
+        measured = [g for g in ds["groups"] if g["status"] != "deleted"]
+        if measured and (not ds["coverage"].get("stats") or any(g.get("stats_missing") for g in measured)):
+            return "no_stats"
+        if ds["totals"]["spent"] == 0:
+            return "idle"
+    return "zero_spend" if ds.get("zero_spend") else "ok"
+
+
+def _fmt_rub(v) -> str:
+    return f"{v:,.0f} ₽".replace(",", " ")
+
+
+def zero_spend_head(ds: dict, short: bool = False) -> str:
+    """Что сказать про нулевой расход живых групп: про весь кабинет — только если предполётка подтвердила 0 ₽;
+    «на удалённые группы» — только если удалённые есть и статистика остальных полная. short — для быстрого анализа."""
+    acc = ds.get("account_spent")
+    if acc is None:
+        return "Живые группы за период не откручивали (0 ₽)" if short else \
+            "Расход живых групп за период 0 ₽ (расход всего кабинета не проверялся)"
+    if acc == 0:
+        return "Кабинет за период не откручивал (0 ₽)" if short else \
+            "Расход кабинета за период 0 ₽: группы есть, но не откручивали"
+    rest = [g for g in ds["groups"] if g["status"] != "deleted"]
+    archived = round(sum(g["stats"]["spent"] for g in rest), 2)   # живые — 0
+    diff = round(acc - archived, 2)
+    diff = diff if diff >= 1 else 0.0   # копейки округлений — не «пришлось на удалённые»
+    has_deleted = any(g["status"] == "deleted" for g in ds["groups"])
+    mismatch = acc - archived <= -1   # кабинет меньше архивных групп: данные расходятся, раскладке не верим
+    if mismatch or (diff and (not has_deleted or any(g.get("stats_missing") for g in rest))):
+        return f"Расход кабинета за период {_fmt_rub(acc)}, у живых групп 0 ₽ — разложить разницу по группам не удалось"
+    parts = ([f"{_fmt_rub(diff)} пришлось на удалённые группы"] if diff else []) + \
+        ([f"{_fmt_rub(archived)} — на архивные группы"] if archived else [])
+    return "Живые группы за период не откручивали" + ("; " + "; ".join(parts) if parts else "")
 
 
 def _check_stats(entity: str, s, out: list):
@@ -569,7 +657,7 @@ def _read_collect_log(ws: Path):
         data = json.loads((ws / "collect_log.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    return data if isinstance(data, dict) else None
+    return mark_recovered(data, ws / "raw") if isinstance(data, dict) else None
 
 
 def main(argv=None) -> int:
@@ -603,6 +691,19 @@ def main(argv=None) -> int:
                 print(f"✗ metrika.json: {e}")
             return 3
         merge_metrika(ds, metrika)
+    state = spend_state(ds)
+    if state == "no_stats":
+        print("✗ В кабинете нет живых групп, а статистика не получена по архивным группам — есть ли расход за "
+              "период, неизвестно. См. collect_log.json; повторите сбор статистики в новой рабочей папке.")
+        return 3
+    if state == "idle":
+        acc = ds.get("account_spent")
+        where = (f" (расход кабинета за период {acc:,.0f} ₽ пришёлся на удалённые группы)".replace(",", " ")
+                 if acc else "")
+        print(f"✗ В кабинете нет живых групп (все удалены или в архиве) и расхода по ним за {args.date_from} — "
+              f"{args.date_to} нет{where}: аудит строить не на чем. Выберите другой кабинет или вернитесь, когда "
+              "группы заработают.")
+        return 5
     issues = check_sanity(ds)
     if issues:
         (ws / "sanity.json").write_text(json.dumps(issues, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -612,6 +713,9 @@ def main(argv=None) -> int:
         return 3
     (ws / "dataset.json").write_text(json.dumps(ds, ensure_ascii=False, indent=1), encoding="utf-8")
     print(f"групп: {len(ds['groups'])}, объявлений: {len(ds['banners'])}, расход: {ds['totals']['spent']} ₽")
+    if ds["zero_spend"]:
+        print("⚠ Живые группы за период не откручивали (расход 0 ₽) — отчёт выйдет с плашкой, выводов по "
+              "эффективности не будет.")
     return 0
 
 

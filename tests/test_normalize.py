@@ -6,7 +6,7 @@ from scripts.normalize import (aggregate, build_dataset, check_sanity, main, mon
                                targeting_key)
 from scripts.raw_store import write_call
 
-P = {"date_from": "2026-09-01", "date_to": "2026-09-30", "metrics": "all"}
+P = {"date_from": "2026-09-01", "date_to": "2026-09-30", "metrics": "base"}
 
 
 def base(spent="0", shows=0, clicks=0, goals=0, ctr=None, vk_result=0):
@@ -85,7 +85,7 @@ def test_build_dataset(tmp_path):
     assert ds["totals"]["spent"] == 900.0
     assert ds["coverage"] == {"path": "B", "banners": True, "summary": True, "stats": True,
                               "pixels": False, "metrika": False, "banner_groups": [1],
-                              "users_lists": False, "users_lists_no_access": False}
+                              "users_lists": False, "users_lists_no_access": False, "preflight_no_spend": False}
     assert check_sanity(ds) == []
 
 
@@ -261,11 +261,11 @@ def test_group_not_covered_anywhere_is_stats_missing(tmp_path):
     ds = build_dataset(raw, "2026-09-01", "2026-09-30")
     g2 = ds["groups"][1]
     assert g2["stats_missing"] is True and g2["stats"]["spent"] == 0.0
-    assert "Статистика не получена для 1 групп — итоги и выводы по ним неполные." in ds["notes"]
+    assert "Статистика не получена для 1 группы — итоги и выводы по ним неполные." in ds["notes"]   # падеж по числу
 
 
 def test_summary_all_time_does_not_block_audit(tmp_path):
-    """statistics_summary игнорирует период (баг MCP): итоги берём из дней, расхождение — не код 3."""
+    """statistics_summary — только за всё время: итоги берём из дней, расхождение — не код 3."""
     raw = tmp_path / "raw"
     cabinet(raw, [_active(1)])
     _stat_call(raw, "vk_ads_statistics_summary", "campaigns", [1],
@@ -402,7 +402,7 @@ def test_v1_fields(tmp_path):
     assert g1["layer"] == "lal" and g2["layer"] == "cold"
     assert g1["features"]["has_keywords"] is True and g2["features"]["has_keywords"] is False
     assert g1["max_price_rub"] == 50.0 and g2["max_price_rub"] is None
-    assert g1["auto_utm"] is True and g2["auto_utm"] is False
+    assert g1["auto_utm"] is True and g2["auto_utm"] is None   # нет ключа enable_utm — не подтверждено (2-й прогон)
     b = ds["banners"][0]
     assert b["cta"] == "sign_up" and b["text"] == "Запишитесь" and b["erid"] == "Kra23"
     assert b["urls"] == ["https://s.ru/?utm_source=vk"] and b["ratios"] == ["1:1"] and b["content_ids"] == [50]

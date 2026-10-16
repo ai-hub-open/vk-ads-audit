@@ -76,9 +76,11 @@ def test_f3_unknown_when_a_big_group_has_unknown_frequency():
     assert status(checklist(ds), "F3")["status"] == "unknown"
 
 
-def test_f3_unknown_not_na_when_only_small_groups_have_frequency():
+def test_f3_na_when_only_small_groups():
+    # Ревью fix/live-run-2: групп с достаточными показами нет — проверять нечего («—» na), а не «нет данных».
     ds = make_ds([_g(1, 1.5, shows=500)])
-    assert status(checklist(ds), "F3")["status"] == "unknown"
+    c = status(checklist(ds), "F3")
+    assert (c["status"], c["reason"]) == ("na", "нечего проверять: нет групп с достаточными показами")
 
 
 def test_f3_pass_when_every_eligible_group_known():
@@ -234,7 +236,9 @@ def test_group_with_utm_template_is_tagged(tmp_path):
     cabinet(raw, [_active(1, utm=tpl), _active(2, enable_utm=True, utm=None), _active(3, utm=None),
                   _active(4, enable_utm=False, utm="")])
     g = {x["id"]: x["auto_utm"] for x in build_dataset(raw, *D)["groups"]}
-    assert g == {1: True, 2: True, 3: False, 4: False}      # ключ enable_utm у других групп есть: отсутствие = выключено
+    # Второй живой прогон: отсутствие ключа enable_utm «выключено» не означает (не подтверждено) — 3 теперь None;
+    # явный enable_utm false с пустым шаблоном (4) — по-прежнему False.
+    assert g == {1: True, 2: True, 3: None, 4: False}
 
 
 def test_utm_unknown_when_no_enable_utm_anywhere_and_no_template(tmp_path):
@@ -288,7 +292,8 @@ def test_e7_unknown_reason_wording():
 
 def test_quick_zero_spend_wording(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("VK_ADS_CONNECTION_URL", URL)
-    monkeypatch.setattr(collect_mod, "McpClient", lambda url, **kw: SpendClient(groups(1), spent="0"))
+    # живых групп нет — иначе сбор идёт дальше (ревью fix/live-run-2)
+    monkeypatch.setattr(collect_mod, "McpClient", lambda url, **kw: SpendClient(groups(1, deleted={1}), spent="0"))
     rc = collect_mod.main(["--workspace", str(tmp_path / "ws"), "--mode", "quick", "--date-from", "2026-09-01",
                            "--date-to", "2026-09-30"])
     assert rc == 5 and "кабинет не откручивал" in capsys.readouterr().out

@@ -90,7 +90,9 @@ def _bare(ds, *, banner_keys=(), group_keys=()):
 
 
 def test_layer_checks_unknown_without_targetings():
-    ds = _bare(make_ds([make_group(1)], [make_banner(11, 1), make_banner(12, 1)]), group_keys=("layer",))
+    # у группы есть расход: без него B3 — «нет расхода за период» раньше гейта слоёв (повторное ревью fix/live-run-2)
+    g = make_group(1, stats=stats(500, 5000, 50, 1))
+    ds = _bare(make_ds([g], [make_banner(11, 1), make_banner(12, 1)]), group_keys=("layer",))
     cl = checklist(ds)
     for cid in ("B1.retargeting", "B2", "B3", "B4"):
         assert status(cl, cid) == "unknown", cid

@@ -101,7 +101,10 @@ def test_duplicate_targeting():
 def test_unused_segments():
     ds = make_ds([make_group(1, segment_ids=[5])], healthy_banners(1),
                  segments=[{"id": 5, "name": "used"}, {"id": 6, "name": "unused"}])
-    assert ("unused_segments", 6) in rules(ds) and ("unused_segments", 5) not in rules(ds)
+    # Второй живой прогон: одна сводная карточка на кабинет (entity — кабинет), id сегментов — в примерах.
+    assert ("unused_segments", None) in rules(ds)
+    f = [x for x in diagnose(ds, TH)["findings"] if x["rule"] == "unused_segments"][0]
+    assert f["evidence"]["examples"] == [6] and f["evidence"]["segments_unused"] == 1
 
 
 def test_no_pixel():

@@ -21,11 +21,11 @@ from pathlib import Path
 try:
     from scripts._console import setup_console
     from scripts._workspace import SKILL_ROOT, resolve_workspace
-    from scripts.features import is_live_group, parse_dt
+    from scripts.features import is_live_group, parse_dt, plural
 except ImportError:  # запуск напрямую
     from _console import setup_console
     from _workspace import SKILL_ROOT, resolve_workspace
-    from features import is_live_group, parse_dt
+    from features import is_live_group, parse_dt, plural
 
 LEVEL_ORDER = {"red": 0, "orange": 1, "green": 2, "white": 3}
 DEFAULT_THRESHOLDS = SKILL_ROOT / "references" / "thresholds.json"
@@ -46,6 +46,16 @@ CHECK_OF = {
     "spend_no_conversions": "F6", "cpa_above_target": "F6",
     "high_bounce": "G1", "click_loss": "G2", "goals_without_vk_conversions": "G3",
 }
+
+
+def utm_unconfirmed_reason(n: int) -> str:
+    return f"авто-UTM у {n} {plural(n, 'группы', 'групп', 'групп')} не подтверждена API — проверьте в кабинете"
+
+
+def utm_unconfirmed_text(n: int) -> str:
+    """Строка «Ограничений»: та же причина, что у A3 «unknown», с заглавной буквы."""
+    r = utm_unconfirmed_reason(n)
+    return r[0].upper() + r[1:] + "."
 
 
 def rule(fn):
@@ -106,6 +116,16 @@ def _banner_groups(ds) -> set:
 
 def _is_auto(g, th) -> bool:
     return g["autobidding_mode"] in th["auto_bidding_modes"]
+
+
+def _is_manual(g, th) -> bool:
+    """Ручная ставка (second_price_mean: ставка в price, фактический CPM — подтверждено 16.10.2026), не автостратегия."""
+    return g["autobidding_mode"] in th.get("manual_bidding_modes", [])
+
+
+def bidding_label(mode, th):
+    """Режим ставки по-человечески; неизвестный режим — None (сырое значение API в отчёт не идёт)."""
+    return th.get("bidding_mode_labels", {}).get(mode) if mode else None
 
 
 def _run_days(ds, g) -> int:
@@ -304,14 +324,27 @@ def duplicate_targeting(ds, th, ctx):
     return out
 
 
+def _segments_of(groups) -> set:
+    # исключённый сегмент (минус-аудитория) тоже «используется»
+    return {i for g in groups for i in list(g["segment_ids"]) + list(g.get("excluded_segment_ids") or [])}
+
+
 @rule
 def unused_segments(ds, th, ctx):
-    # исключённый сегмент (минус-аудитория) тоже «используется»
-    used = {i for g in _live(ds) for i in list(g["segment_ids"]) + list(g.get("excluded_segment_ids") or [])}
+    """Одна сводная карточка на кабинет (второй живой прогон: 24 карточки по сегменту — шум)."""
+    used = _segments_of(_live(ds))
+    in_dead = _segments_of(g for g in ds["groups"] if not is_live_group(g))
     _seen(ctx, "unused_segments", len(ds["segments"]))
-    return [finding("unused_segments", "white", "segment", s, "Сегмент не используется ни в одной группе",
-                    {}, "Удалить или запустить на него группу")
-            for s in ds["segments"] if s["id"] not in used]
+    unused = [s["id"] for s in ds["segments"] if s["id"] not in used]
+    if not unused:
+        return []
+    n = len(unused)
+    title = (f"{n} {plural(n, 'сегмент', 'сегмента', 'сегментов')} не "
+             f"{plural(n, 'используется', 'используются', 'используются')} ни в одной живой группе")
+    return [finding("unused_segments", "white", "account", ACCOUNT, title,
+                    {"segments_unused": n, "only_in_deleted_or_archived_groups": sum(1 for i in unused if i in in_dead),
+                     "examples": unused[:5]},
+                    "Удалить лишние сегменты или запустить на них группы")]
 
 
 @rule
@@ -357,17 +390,36 @@ def ord_missing(ds, th, ctx):
                     "Включить автоматическую маркировку в кабинете и проверить данные рекламодателя")]
 
 
+def _has_utm(b) -> bool:
+    return any("utm_" in u for u in b.get("urls") or [])
+
+
+def _site_banners(ds, th) -> list:
+    """Активные объявления живых групп со ссылкой на сайт (не на VK и мессенджеры)."""
+    return [b for b in _banners(ds) if b["status"] in th["active_statuses"]
+            and any(_site_url(u, th) for u in b.get("urls") or [])]
+
+
+def utm_unconfirmed_groups(ds, th) -> list:
+    """id групп, где авто-UTM не подтверждена API (auto_utm None), а объявление на сайт без utm_ в ссылке:
+    есть ли метки, не определить — проверить в кабинете."""
+    auto = {g["id"]: g.get("auto_utm") for g in _live(ds) if _active(g, th)}   # паузные не в счёт (A3 — «—»)
+    return sorted({b["group_id"] for b in _site_banners(ds, th)
+                   if b["group_id"] in auto and auto[b["group_id"]] is None and not _has_utm(b)}, key=str)
+
+
 @rule
 def utm_missing(ds, th, ctx):
-    known = {g["id"]: g["auto_utm"] for g in ds["groups"] if g.get("auto_utm") is not None}  # None — молчим
-    site = [b for b in _banners(ds) if b["status"] in th["active_statuses"] and b["group_id"] in known
-            and any(_site_url(u, th) for u in b.get("urls") or [])]
-    _seen(ctx, "utm_missing", len(site))  # группы с авто-UTM проверены: метки им ставит VK
-    bad = [b for b in site if known[b["group_id"]] is False and not any("utm_" in u for u in b.get("urls") or [])]
+    auto = {g["id"]: g.get("auto_utm") for g in _live(ds)}
+    site = [b for b in _site_banners(ds, th) if b["group_id"] in auto]
+    # utm_ в ссылке — метки есть; авто-UTM включена — их ставит VK; None без utm_ — не подтверждено, молчим
+    checked = [b for b in site if _has_utm(b) or auto[b["group_id"]] is not None]
+    _seen(ctx, "utm_missing", len(checked))
+    bad = [b for b in checked if auto[b["group_id"]] is False and not _has_utm(b)]
     if not bad:
         return []
     return [finding("utm_missing", "orange", "account", ACCOUNT, "Ссылки на сайт без UTM-меток",
-                    {"without_utm": len(bad), "site_banners": len(site), "examples": [b["id"] for b in bad[:5]]},
+                    {"without_utm": len(bad), "site_banners": len(checked), "examples": [b["id"] for b in bad[:5]]},
                     "Разметить все ссылки UTM — иначе не понять, какие объявления приводят целевой трафик")]
 
 
@@ -471,7 +523,8 @@ def no_cbo(ds, th, ctx):
 @rule
 def naming(ds, th, ctx):
     pats = [re.compile(p, re.I) for p in th["default_name_patterns"]]
-    names = ([p["name"] for p in ds["plans"] if p.get("status") != "deleted"]
+    live_plans = {g.get("ad_plan_id") for g in _live(ds)}   # кампании только с удалёнными группами — не в счёт
+    names = ([p["name"] for p in ds["plans"] if p.get("status") != "deleted" and p.get("id") in live_plans]
              + [g["name"] for g in _live(ds)]
              + [b["name"] for b in _banners(ds) if b["status"] != "deleted"])
     names = [n.strip() for n in names if n and n.strip()]  # пустые названия не считаем ни плохими, ни в общем числе
@@ -603,9 +656,12 @@ def lal_small_source(ds, th, ctx):
 def _referenced_list_ids(ds, th):
     """id баз, на которые ссылаются сегменты живых активных групп (цель или исключение);
     None — связь «база → сегмент» в данных не получена."""
+    active = [g for g in _live(ds) if _active(g, th)]
+    if not active:   # нет активных групп — ни одна база ни в чьём таргетинге не стоит
+        return set()
     if not ds.get("segment_relations_known"):
         return None
-    used = {i for g in _live(ds) if _active(g, th)
+    used = {i for g in active
             for i in list(g["segment_ids"]) + list(g.get("excluded_segment_ids") or [])}
     return {lid for s in ds["segments"] if s["id"] in used for lid in (s.get("list_ids") or [])}
 
@@ -648,6 +704,8 @@ def cap_too_early(ds, th, ctx):
             continue
         if _is_auto(g, th):  # при автостратегии «предельная цена» — не ручной кап
             continue
+        if _is_manual(g, th):  # ручная ставка — другой режим, не «предельная цена»; на старте не ограничение (решение Лизы)
+            continue
         w7 = (g.get("windows") or {}).get("7")
         if w7 is None:  # окно 7 дней не получено — без подмены периодом целиком
             continue
@@ -673,6 +731,8 @@ def _content_groups(ds, th):
 def missing_ratios(ds, th, ctx):
     out = []
     for g, active in _content_groups(ds, th):
+        if not active:   # активных объявлений нет — форматов нет вовсе, это находка no_active_banners, а не E1
+            continue
         if any(not b.get("content_ids") or not (b.get("ratios") or b.get("has_video")) or b.get("ratios_unknown")
                for b in active):
             continue   # не все объявления с контентом и классифицированы (или соотношение не читается) — молчим
@@ -1075,7 +1135,13 @@ def funnel_status(ds: dict, th: dict) -> dict:
                 out[key] = ("unknown", "слои аудиторий не определены — таргетинги не получены")
                 continue
             ok = any(_layer(g) == "warm" for g in live)
-        elif key == "senler":
+        elif key == "senler":   # единственная воронка по объявлениям; остальные — по цели и слоям групп
+            if not ds["coverage"].get("banners"):
+                out[key] = ("unknown", "объявления не собирались")
+                continue
+            if not banners and not any(g["id"] not in _banner_groups(ds) for g in live):
+                out[key] = ("na", "нечего проверять: нет активных объявлений")
+                continue
             if not urls:
                 out[key] = ("unknown", "ссылки объявлений не получены")
                 continue
@@ -1176,8 +1242,10 @@ def main(argv=None) -> int:
     counts = defaultdict(int)
     for f in result["findings"]:
         counts[f["level"]] += 1
+    total = result["checklist"]["total"]
+    score = result["checklist"].get("idle") if total is None else f"балл {total[0]} / {total[1]}"
     print(f"находок: {len(result['findings'])} ({dict(counts)}), опорный CPA: {result['ref_cpa']} "
-          f"({result['ref_source']}), балл {result['checklist']['total'][0]} / {result['checklist']['total'][1]}")
+          f"({result['ref_source']}), {score}")
     return 0
 
 

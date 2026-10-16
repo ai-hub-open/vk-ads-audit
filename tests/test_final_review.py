@@ -53,7 +53,7 @@ def test_exclusion_only_segment_is_not_unused():
     g = make_group(1, segment_ids=[5], excluded_segment_ids=[6])
     ds = make_ds([g], segments=[{"id": 5, "name": "a"}, {"id": 6, "name": "минус"}, {"id": 7, "name": "никому"}])
     fs = found(ds, "unused_segments")
-    assert [f["entity"]["id"] for f in fs] == [7]
+    assert len(fs) == 1 and fs[0]["evidence"]["examples"] == [7]   # одна сводная карточка (второй живой прогон)
     assert fs[0]["check"] is None
 
 

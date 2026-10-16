@@ -82,6 +82,11 @@ def _load(path: Path, tool: str) -> dict:
         raise ValueError(f"{path.name}: arguments должен быть объектом, а не {type(data['arguments']).__name__}")
     if data["tool"] != tool:
         raise ValueError(f"{path.name}: tool в файле {data['tool']!r}, а ожидался {tool!r}")
+    resp = data["response"]
+    if isinstance(resp, dict) and (resp.get("isError") is True or resp.get("error") is True):
+        # те же признаки, что у import: такой файл — не удачный вызов и не данные кабинета
+        raise ValueError(f"{path.name}: в response ответ-ошибка инструмента, а не данные кабинета — удали файл "
+                         "и запиши сбой в collect_log.json (или повтори вызов)")
     return data
 
 
@@ -105,6 +110,40 @@ def items_of(raw_dir: Path, tool: str, where: Optional[Callable[[dict], bool]] =
             continue
         out.extend(resp.get("items") or [])
     return out
+
+
+def call_key(tool: str, arguments) -> str:
+    """Один и тот же вызов: инструмент и аргументы. `paginated` (пометка сборщика) не в счёт, числа и строки-числа
+    равны (`campaign_id` 1 и "1")."""
+    args = {k: (str(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else v)
+            for k, v in (arguments or {}).items() if k != "paginated"} if isinstance(arguments, dict) else {}
+    return tool + " " + json.dumps(args, sort_keys=True, ensure_ascii=False)
+
+
+def mark_recovered(collect_log, raw_dir: Optional[Path] = None):
+    """Копия журнала, где у упавшего вызова стоит `recovered`, если тот же вызов (инструмент и аргументы) потом прошёл:
+    позже в журнале или файлом в raw/ (путь A). Такой сбой — не ограничение отчёта. Нечитаемые файлы raw/ пропускаем:
+    их разбирает `raw_store check`."""
+    if not isinstance(collect_log, dict) or not isinstance(collect_log.get("calls"), list):
+        return collect_log
+    done: set = set()
+    if raw_dir is not None and Path(raw_dir).is_dir():
+        for path in Path(raw_dir).iterdir():
+            try:
+                data = _load(path, _tool_of(path))
+            except ValueError:
+                continue
+            done.add(call_key(data["tool"], data["arguments"]))
+    calls = [dict(c) if isinstance(c, dict) else c for c in collect_log["calls"]]
+    for i, c in enumerate(calls):
+        if not isinstance(c, dict) or c.get("ok", True):
+            continue
+        key = call_key(c.get("tool"), c.get("arguments"))
+        later = any(isinstance(x, dict) and x.get("ok") and call_key(x.get("tool"), x.get("arguments")) == key
+                    for x in calls[i + 1:])
+        if later or key in done:
+            c["recovered"] = True
+    return {**collect_log, "calls": calls}
 
 
 def _unwrap_mcp(data):

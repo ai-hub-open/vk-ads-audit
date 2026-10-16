@@ -22,6 +22,7 @@ AUTO_PADS_KEYS = ("auto_placements", "pads_auto")                               
 DEVICE_ADJ_KEYS = ("device_bid_adjustments", "mobile_bid_adjustments")               # API?
 DEMO_ADJ_KEYS = ("demography_bid_adjustments", "sex_age_bid_adjustments")            # API?
 ERID_KEYS = ("ord_marker",)                                                          # подтверждено 16.10.2026 (объявление)
+ORD_STATUS_KEYS = ("or_status",)              # подтверждено 16.10.2026 (объявление): смысл значений не расшифрован — справочно
 AUTO_UTM_KEYS = ("enable_utm",)                                                     # подтверждено 16.10.2026 (группа)
 PLAN_BUDGET_KEYS = ("budget_limit", "budget_limit_day")                              # API? (кампания)
 SIZE_KEYS = ("size", "count", "entries_count", "audience_size")                      # API? (сегмент, база)
@@ -33,6 +34,13 @@ USERS_LIST_TYPE_MARKERS = ("users_list", "user_list")                           
 RATIOS = {"1:1": 1.0, "4:5": 0.8, "16:9": 16 / 9, "9:16": 9 / 16}
 RATIO_TOL = 0.04
 _LAL_RE = re.compile(r"lookalike|look-alike|\blal\b|похож", re.I)
+
+
+def plural(n: int, one: str, few: str, many: str) -> str:
+    """Русская форма по числу: 1 группа, 2 группы, 5 групп (11–14 — «много»)."""
+    if n % 10 == 1 and n % 100 != 11:
+        return one
+    return few if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14) else many
 
 
 def is_live_group(g) -> bool:

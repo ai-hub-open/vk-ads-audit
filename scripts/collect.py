@@ -1,9 +1,11 @@
 """
 collect.py — путь B: скрипт сам собирает кабинет из MCP VK Рекламы в raw/.
 
-Предполётка (один вызов): расход пользователя за период по дням; нулевой расход — сбор не начинается.
+Предполётка (один вызов): расход пользователя за период по дням — в collect_log.json (preflight_spent). Нулевой
+расход и нет живых групп — сбор останавливается; живые группы есть — сбор идёт, отчёт выйдет с плашкой «0 ₽».
 Опись (кампании, группы, объявления по группам, сегменты, списки, пиксели) и
-статистика (по дням по группам и по объявлениям; сводка по группам — только ради охвата и частоты).
+статистика (по дням по группам и по объявлениям; сводка по группам — за всё время, без дат, только ради
+охвата и частоты).
 Только инструменты из белого списка mcp_client. Частичный сбой не останавливает
 сбор — он попадает в collect_log.json, а оттуда в ограничения отчёта.
 
@@ -12,7 +14,7 @@ collect.py — путь B: скрипт сам собирает кабинет �
   2 — путь B недоступен (нет ссылки или --probe провалился), неверные аргументы или период;
   3 — критический сбой: не собрана опись кампаний (collect_log.json: critical);
   4 — raw/ уже содержит файлы: нужна новая рабочая папка или очистка raw/;
-  5 — за период в кабинете нет расхода: сбор не запускался, предложи другой период или кабинет.
+  5 — за период в кабинете нет расхода и нет живых групп: собран только список групп, предложи другой кабинет.
   (2 также — период старше доступной истории статистики, ~366 дней.)
 
     python -m scripts.collect --probe [--account-id ID]
@@ -43,18 +45,21 @@ except ImportError:  # запуск напрямую
 
 PLAN_FIELDS = "id,name,status,objective,budget_limit,budget_limit_day,date_start,date_end,created,updated"
 # Базовые списки и расширенные поля подтверждены живым прогоном 2026-10-16 (auto_utm, erid, ord_token, ord_erid
-# сервер отвергает: 400 unknown_resource_fields; маркировка — ord_marker, UTM группы — enable_utm и utm).
+# сервер отвергает: 400 unknown_resource_fields; маркировка — ord_marker, статус ОРД — or_status, UTM группы — enable_utm
+# и utm).
 GROUP_FIELDS_BASE = ("id,name,status,objective,package_id,ad_plan_id,budget_limit,budget_limit_day,targetings,"
                      "issues,created,updated,date_start,date_end,delivery,autobidding_mode,max_price,priced_goal")
 BANNER_FIELDS_BASE = ("id,name,campaign_id,status,moderation_status,moderation_reasons,issues,delivery,"
                       "textblocks,urls,content,created,updated,user_can_request_remoderation")
 GROUP_FIELDS = GROUP_FIELDS_BASE + ",enable_utm,utm"
-BANNER_FIELDS = BANNER_FIELDS_BASE + ",call_to_action,ord_marker"
+BANNER_FIELDS = BANNER_FIELDS_BASE + ",call_to_action,ord_marker,or_status"
 STATS_CHUNK = 50
 HISTORY_DAYS = 366          # глубина дневной статистики VK: MCP отказывает сам, VK — 400 WRONG_DATE (минимальная дата в тексте)
 _MIN_DATE_RES = (re.compile(r"minimal allowed date is '(\d{4})-(\d{1,2})-(\d{1,2})'", re.I),   # VK: WRONG_DATE
                  re.compile(r"доступен период с (\d{4})-(\d{1,2})-(\d{1,2})"))                    # отказ самого MCP
-METRICS = "all"
+# Подтверждено 16.10.2026: «base» и «base,uniques» принимаются (вместо тяжёлого «all»). Дням охват не нужен.
+METRICS_DAY = "base"
+METRICS_SUMMARY = "base,uniques"   # охват и частота — только в uniques
 LISTS = ("vk_ads_remarketing_segments_list", "vk_ads_users_lists_list", "vk_ads_remarketing_pixels_list")
 MODES = ("deep", "quick")
 
@@ -236,17 +241,16 @@ def collect(client, raw_dir: Path, date_from: str, date_to: str, mode: str = "de
                                "Укажи новую рабочую папку или удали содержимое raw/.")
     c = _Collector(client, raw_dir, secrets)
     log = {"mode": mode, "date_from": date_from, "date_to": date_to, "calls": c.log,
-           "errors": 0, "critical": False, "no_spend": False}
+           "errors": 0, "critical": False, "no_spend": False, "preflight_spent": None}
     out = raw_dir.parent / "collect_log.json"
     try:
-        period = {"date_from": date_from, "date_to": date_to, "metrics": METRICS}
+        period = {"date_from": date_from, "date_to": date_to, "metrics": METRICS_DAY}
         uid = _user_id(c.probe("vk_ads_account_info", {}))
-        if uid is not None:   # предполётка: нулевой расход за период — собирать нечего
+        spent = None
+        if uid is not None:   # предполётка: расход кабинета за период — в журнал, по нему плашка отчёта
             resp = c.probe("vk_ads_statistics_day", {"entity": "users", "ids": str(uid), **period})
             spent = total_spend(resp) if resp is not None else None
-            if spent == 0:
-                log["no_spend"] = True
-                return log
+            log["preflight_spent"] = spent
             if spent is None:
                 log["preflight"] = "пропущена: расход за период прочитать не удалось"
         else:
@@ -258,6 +262,9 @@ def collect(client, raw_dir: Path, date_from: str, date_to: str, mode: str = "de
             groups = []
         measured = [g["id"] for g in groups if g.get("status") != "deleted"]          # расход архивных — в итогах
         live = [g["id"] for g in groups if g.get("status") != "deleted" and not _archived(g)]
+        if spent == 0 and not live and not log["critical"]:   # 0 ₽ и живых групп нет — собирать нечего
+            log["no_spend"] = True
+            return log
 
         banner_ids: list = []
         banner_fields = BANNER_FIELDS
@@ -276,8 +283,8 @@ def collect(client, raw_dir: Path, date_from: str, date_to: str, mode: str = "de
 
         for chunk in _chunks(measured, STATS_CHUNK):
             ids = ",".join(map(str, chunk))
-            if mode == "deep":   # сводка отдаёт всё время (баг MCP): нужна только ради охвата и частоты новых групп
-                c.call("vk_ads_statistics_summary", {"entity": "campaigns", "ids": ids, **period})
+            if mode == "deep":   # сводка — только за всё время, с датами MCP отказывает: нужна ради охвата и частоты
+                c.call("vk_ads_statistics_summary", {"entity": "campaigns", "ids": ids, "metrics": METRICS_SUMMARY})
             c.call("vk_ads_statistics_day", {"entity": "campaigns", "ids": ids, **period})
         for chunk in _chunks(banner_ids, STATS_CHUNK):   # итоги объявлений — сумма дней, как у групп
             c.call("vk_ads_statistics_day", {"entity": "banners", "ids": ",".join(map(str, chunk)), **period})
@@ -342,12 +349,12 @@ def main(argv=None) -> int:
         print(f"✗ {e} Более ранний период через MCP не собрать.")
         return 2
     if log.get("no_spend") and args.mode == "quick":
-        print(f"✗ За период {args.date_from} — {date_to} кабинет не откручивал (расход 0 ₽): быстрый анализ строить "
-              "не на чем. Выберите другой день или другой кабинет (--account-id).")
+        print(f"✗ За период {args.date_from} — {date_to} кабинет не откручивал (расход 0 ₽, живых групп нет): быстрый "
+              "анализ строить не на чем. Выберите другой кабинет (--account-id).")
         return 5
     if log.get("no_spend"):
-        print(f"✗ За период {args.date_from} — {date_to} расход в кабинете 0 ₽: собирать нечего. "
-              "Выберите другой период или другой кабинет (--account-id).")
+        print(f"✗ За период {args.date_from} — {date_to} расход в кабинете 0 ₽ и живых групп нет (все удалены или "
+              "в архиве): собирать нечего. Выберите другой кабинет (--account-id) или другой период.")
         return 5
     print(f"вызовов: {len(log['calls'])}, с ошибками: {log['errors']} → {ws / 'collect_log.json'}")
     if log["critical"]:
