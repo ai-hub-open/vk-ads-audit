@@ -19,11 +19,11 @@ from collections import defaultdict
 try:
     from scripts.diagnose import (ASK_FUNNELS, FUNNEL_LABELS, GUESSED_REASON, _active, _guessed, _banner_groups, _banners, _date, _feat, _layer,
                                   _live, _measured, _run_days, funnel_status, plural, stale_undetermined_groups,
-                                  utm_unconfirmed_groups, utm_unconfirmed_reason)
+                                  used_lal_segments, utm_unconfirmed_groups, utm_unconfirmed_reason)
 except ImportError:  # запуск напрямую
     from diagnose import (ASK_FUNNELS, FUNNEL_LABELS, GUESSED_REASON, _active, _guessed, _banner_groups, _banners, _date, _feat, _layer, _live,
-                          _measured, _run_days, funnel_status, plural, stale_undetermined_groups, utm_unconfirmed_groups,
-                          utm_unconfirmed_reason)
+                          _measured, _run_days, funnel_status, plural, stale_undetermined_groups, used_lal_segments,
+                          utm_unconfirmed_groups, utm_unconfirmed_reason)
 
 BLOCKS = [("A", "Техническая настройка"), ("B", "Структура аккаунта"), ("C", "Таргетинг"),
           ("D", "Бюджет и стратегия"), ("E", "Объявления"), ("F", "Эффективность"),
@@ -203,8 +203,13 @@ def run_checks(ds: dict, th: dict, findings: list, evaluated: dict | None = None
              _first(no_active, _known_feature(live, "keys", "ключи таргетинга")))
     by_rules("C12", "Нет внутренней конкуренции", ["duplicate_targeting", "creative_overlap"], no_active)
     lal = [s for s in ds["segments"] if s.get("lal")]
-    lal_gate = ("na", "LAL-сегментов нет") if not lal else (
-        OK if any(s.get("size") is not None for s in lal) else _unknown("размер LAL-сегмента"))
+    used_lal = used_lal_segments(ds)
+    if not lal:
+        lal_gate = ("na", "LAL-сегментов нет")
+    elif not used_lal:   # третий живой прогон: LAL есть, но ни в одной живой группе не стоит
+        lal_gate = ("na", "нечего проверять: LAL-сегменты не используются в живых группах")
+    else:
+        lal_gate = OK if any(s.get("size") is not None for s in used_lal) else _unknown("размер LAL-сегмента")
     by_rules("C13", "LAL от качественных баз", ["lal_small_source"], lal_gate)
     lists = ds.get("users_lists") or []
     if no_active[0]:   # база важна, только если стоит в таргетинге активной группы

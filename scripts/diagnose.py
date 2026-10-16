@@ -676,15 +676,22 @@ def creative_overlap(ds, th, ctx):
     return out
 
 
+def used_lal_segments(ds) -> list:
+    """LAL-сегменты, которые стоят в таргетинге (или исключениях) хотя бы одной живой группы: качество базы LAL
+    важно, только если по нему крутится реклама."""
+    used = _segments_of(_live(ds))
+    return [s for s in ds["segments"] if s.get("lal") and s["id"] in used]
+
+
 @rule
 def lal_small_source(ds, th, ctx):
-    _seen(ctx, "lal_small_source", sum(1 for s in ds["segments"] if s.get("lal") and isinstance(s.get("size"), int)))
+    lal = [s for s in used_lal_segments(ds) if isinstance(s.get("size"), int)]
+    _seen(ctx, "lal_small_source", len(lal))
     return [finding("lal_small_source", "orange", "segment", s, "LAL собран на слишком маленькой базе",
                     {"segment_size": s["size"], "minimum": th["lal_min_source"]},
                     f"Проверить исходную базу LAL: нужна база от {th['lal_min_source']} целевых действий",
                     conf="low")
-            for s in ds["segments"] if s.get("lal") and isinstance(s.get("size"), int)
-            and s["size"] < th["lal_min_source"]]
+            for s in lal if s["size"] < th["lal_min_source"]]
 
 
 def _referenced_list_ids(ds, th):

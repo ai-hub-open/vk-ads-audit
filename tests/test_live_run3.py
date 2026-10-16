@@ -444,3 +444,19 @@ def test_learn_more_is_generic_visit_site_and_order_are_not():
     assert row(checklist(ds), "E7")["status"] == "fail"
     ok = make_ds([make_group(1)], bs[1:])
     assert row(checklist(ok), "E7")["status"] == "pass"
+
+
+# ---- 2.4. C13: LAL-сегменты не используются в живых группах — «нечего проверять» ----
+
+def test_c13_na_when_lal_not_used_by_live_groups():
+    segs = [{"id": 5, "name": "LAL покупатели", "lal": True, "size": 10}]
+    ds = make_ds([make_group(1), make_group(2, status="deleted", segment_ids=[5])], segments=segs)
+    assert found(ds, "lal_small_source") == []
+    c13 = row(checklist(ds), "C13")
+    assert (c13["status"], c13["reason"]) == ("na", "нечего проверять: LAL-сегменты не используются в живых группах")
+
+
+def test_c13_fails_for_used_small_lal():
+    segs = [{"id": 5, "name": "LAL покупатели", "lal": True, "size": 10}]
+    ds = make_ds([make_group(1, segment_ids=[5], layer="lal")], segments=segs)
+    assert found(ds, "lal_small_source") and row(checklist(ds), "C13")["status"] == "fail"
