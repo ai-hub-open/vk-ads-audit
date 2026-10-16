@@ -123,3 +123,33 @@ def test_funnel_questions_documented():
     assert "client_answers.json" in doc and "client_answers.json" in SKILL
     rules = _ref("diagnostic-rules.md")
     assert "`funnel_potential`" in rules and "`ask`" in rules and "`potential`" in rules
+
+
+def test_skill_documents_live_run_fixes():
+    # В claude.ai / Desktop персональной ссылки нет → всегда путь A, ссылку не спрашивать
+    assert "нет персональной ссылки подключения" in SKILL and "всегда идёт" in SKILL and "не спрашивай" in SKILL
+    # предполётка расхода, большие ответы, нет прав, глубина истории
+    assert 'entity="users"' in SKILL and "кодом 5" in SKILL and "| 5 |" in SKILL
+    assert "raw_store import" in SKILL and "--arguments-file" in SKILL
+    assert '"no_access": true' in SKILL and "~430 дней" in SKILL
+    assert "игнорирует даты" in SKILL and "суммой дней" in SKILL
+    tools, lim, rules, log = (_ref("mcp-read-tools.md"), _ref("limitations.md"),
+                              _ref("diagnostic-rules.md"), (SKILL_ROOT / "CHANGELOG.md").read_text(encoding="utf-8"))
+    assert "Подтверждено 16.10.2026" in tools and "`ord_marker`" in tools and "`utm`" in tools
+    assert "рубли" in tools and "уже проценты" in tools and "raw_store import" in tools
+    for fragment in ("Частота и охват за период не определены", "Нет доступа к базам клиентов",
+                     "MCP не возвращает размер сегментов"):
+        assert fragment in lim, fragment
+    assert "ARCHIVED" in rules and "video_landscape_180s" in rules
+    assert "Исправления по первому живому прогону" in log
+
+
+def test_report_limitation_lines_match_docs():
+    """Строки ограничений из normalize / render_report дословно присутствуют в limitations.md."""
+    import re
+    src = (SKILL_ROOT / "scripts" / "normalize.py").read_text(encoding="utf-8")
+    lim = _ref("limitations.md")
+    for fragment in ("Частота и охват за период не определены для", "Нет доступа к базам клиентов (vk_ads_users_lists_list)",
+                     "MCP не возвращает размер сегментов и связи с базами клиентов"):
+        assert fragment in src and fragment.split(" (")[0].split(" для")[0] in lim, fragment
+    assert re.search(r"def import_response", (SKILL_ROOT / "scripts" / "raw_store.py").read_text(encoding="utf-8"))

@@ -59,3 +59,12 @@ def test_path_a_partial_covers_only_five_groups(tmp_path):
     ds = build_dataset(tmp_path / "raw", meta["date_from"], meta["date_to"], meta["target_cpa"], "A")
     assert ds["coverage"]["banner_groups"] == [1, 2, 3, 4, 5]
     assert any("для 2 групп" in n for n in ds["notes"])
+
+
+def test_healthy_f3_checked_with_period_frequency_and_expert_burnout_fires(tmp_path):
+    cl = checklist_of("expert_1", tmp_path)
+    st = {c["id"]: c["status"] for b in cl["blocks"] for c in b["checks"]}
+    assert st["F3"] == "fail"           # группа 9 создана внутри периода: частота из сводки применима
+    cl = checklist_of("healthy", tmp_path)
+    st = {c["id"]: c["status"] for b in cl["blocks"] for c in b["checks"]}
+    assert st["F3"] in ("unknown", "pass")   # группы старше периода: частота не определена — не ❌
