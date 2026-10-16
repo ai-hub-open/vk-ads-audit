@@ -21,11 +21,11 @@ from pathlib import Path
 try:
     from scripts._console import setup_console
     from scripts._workspace import SKILL_ROOT, resolve_workspace
-    from scripts.features import is_live_group, parse_dt
+    from scripts.features import is_live_group, parse_dt, plural
 except ImportError:  # запуск напрямую
     from _console import setup_console
     from _workspace import SKILL_ROOT, resolve_workspace
-    from features import is_live_group, parse_dt
+    from features import is_live_group, parse_dt, plural
 
 LEVEL_ORDER = {"red": 0, "orange": 1, "green": 2, "white": 3}
 DEFAULT_THRESHOLDS = SKILL_ROOT / "references" / "thresholds.json"
@@ -46,13 +46,6 @@ CHECK_OF = {
     "spend_no_conversions": "F6", "cpa_above_target": "F6",
     "high_bounce": "G1", "click_loss": "G2", "goals_without_vk_conversions": "G3",
 }
-
-
-def plural(n: int, one: str, few: str, many: str) -> str:
-    """Русская форма по числу: 1 группа, 2 группы, 5 групп (11–14 — «много»)."""
-    if n % 10 == 1 and n % 100 != 11:
-        return one
-    return few if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14) else many
 
 
 def utm_unconfirmed_reason(n: int) -> str:
@@ -410,7 +403,7 @@ def _site_banners(ds, th) -> list:
 def utm_unconfirmed_groups(ds, th) -> list:
     """id групп, где авто-UTM не подтверждена API (auto_utm None), а объявление на сайт без utm_ в ссылке:
     есть ли метки, не определить — проверить в кабинете."""
-    auto = {g["id"]: g.get("auto_utm") for g in _live(ds)}
+    auto = {g["id"]: g.get("auto_utm") for g in _live(ds) if _active(g, th)}   # паузные не в счёт (A3 — «—»)
     return sorted({b["group_id"] for b in _site_banners(ds, th)
                    if b["group_id"] in auto and auto[b["group_id"]] is None and not _has_utm(b)}, key=str)
 
@@ -1142,7 +1135,13 @@ def funnel_status(ds: dict, th: dict) -> dict:
                 out[key] = ("unknown", "слои аудиторий не определены — таргетинги не получены")
                 continue
             ok = any(_layer(g) == "warm" for g in live)
-        elif key == "senler":
+        elif key == "senler":   # единственная воронка по объявлениям; остальные — по цели и слоям групп
+            if not ds["coverage"].get("banners"):
+                out[key] = ("unknown", "объявления не собирались")
+                continue
+            if not banners and not any(g["id"] not in _banner_groups(ds) for g in live):
+                out[key] = ("na", "нечего проверять: нет активных объявлений")
+                continue
             if not urls:
                 out[key] = ("unknown", "ссылки объявлений не получены")
                 continue

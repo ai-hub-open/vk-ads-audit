@@ -76,9 +76,11 @@ def test_f3_unknown_when_a_big_group_has_unknown_frequency():
     assert status(checklist(ds), "F3")["status"] == "unknown"
 
 
-def test_f3_unknown_not_na_when_only_small_groups_have_frequency():
+def test_f3_na_when_only_small_groups():
+    # Ревью fix/live-run-2: групп с достаточными показами нет — проверять нечего («—» na), а не «нет данных».
     ds = make_ds([_g(1, 1.5, shows=500)])
-    assert status(checklist(ds), "F3")["status"] == "unknown"
+    c = status(checklist(ds), "F3")
+    assert (c["status"], c["reason"]) == ("na", "нечего проверять: нет групп с достаточными показами")
 
 
 def test_f3_pass_when_every_eligible_group_known():

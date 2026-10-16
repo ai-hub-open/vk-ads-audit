@@ -15,12 +15,12 @@ from datetime import date, timedelta
 try:
     from scripts._console import setup_console
     from scripts._workspace import resolve_workspace
-    from scripts.features import is_live_group
+    from scripts.features import is_live_group, plural
     from scripts.normalize import aggregate
 except ImportError:  # запуск напрямую
     from _console import setup_console
     from _workspace import resolve_workspace
-    from features import is_live_group
+    from features import is_live_group, plural
     from normalize import aggregate
 
 SPIKE = 1.5
@@ -103,7 +103,7 @@ def quick_summary(ds: dict, day: str, target_cpa=None) -> dict:
         lines += [_group_line(g) for g in shown]
         hidden = len(flagged) - len(shown)
         if hidden:
-            lines.append(f"…и ещё {hidden} групп с отклонениями")
+            lines.append(f"…и ещё {hidden} {plural(hidden, 'группа', 'группы', 'групп')} с отклонениями")
         lines.append("→ Разобрать подробно? Могу провести глубокий аудит.")
     return {"day": day, "today": today, "prev_total": prev_total, "prev_days": prev_day_count,
             "groups": groups, "lines": lines[:MAX_LINES]}

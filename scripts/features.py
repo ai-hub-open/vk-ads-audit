@@ -36,6 +36,13 @@ RATIO_TOL = 0.04
 _LAL_RE = re.compile(r"lookalike|look-alike|\blal\b|похож", re.I)
 
 
+def plural(n: int, one: str, few: str, many: str) -> str:
+    """Русская форма по числу: 1 группа, 2 группы, 5 групп (11–14 — «много»)."""
+    if n % 10 == 1 and n % 100 != 11:
+        return one
+    return few if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14) else many
+
+
 def is_live_group(g) -> bool:
     """Группа не удалена и не в архиве (VK отдаёт архивные с issues [{"code": "ARCHIVED"}] — в dataset это коды)."""
     issues = g.get("issues") or []

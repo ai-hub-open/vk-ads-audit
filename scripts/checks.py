@@ -8,7 +8,7 @@ potential 🟢 — клиент подтвердил потенциал рост
 Проверка с правилами: fail, если сработала хотя бы одна находка её правил.
 Нет активных групп (или активных объявлений) — «na»: «нечего проверять: нет активных групп» («…объявлений»), а не
 «поле не получено»; гейт «na» никогда не прячет сработавшую находку. Нет живых групп — общий балл не считается
-(total None, idle «кабинет не откручивает»).
+(total None, idle: «кабинет не откручивает» или «нет живых групп — общий балл не считается»).
 """
 from __future__ import annotations
 
@@ -16,10 +16,11 @@ from collections import defaultdict
 
 try:
     from scripts.diagnose import (ASK_FUNNELS, FUNNEL_LABELS, _active, _banner_groups, _banners, _date, _feat, _layer,
-                                  _live, _run_days, funnel_status, utm_unconfirmed_groups, utm_unconfirmed_reason)
+                                  _live, _measured, _run_days, funnel_status, plural, utm_unconfirmed_groups,
+                                  utm_unconfirmed_reason)
 except ImportError:  # запуск напрямую
     from diagnose import (ASK_FUNNELS, FUNNEL_LABELS, _active, _banner_groups, _banners, _date, _feat, _layer, _live,
-                          _run_days, funnel_status, utm_unconfirmed_groups, utm_unconfirmed_reason)
+                          _measured, _run_days, funnel_status, plural, utm_unconfirmed_groups, utm_unconfirmed_reason)
 
 BLOCKS = [("A", "Техническая настройка"), ("B", "Структура аккаунта"), ("C", "Таргетинг"),
           ("D", "Бюджет и стратегия"), ("E", "Объявления"), ("F", "Эффективность"),
@@ -29,6 +30,8 @@ OK = (None, "")
 NO_ACTIVE = ("na", "нечего проверять: нет активных групп")
 NO_ACTIVE_BANNERS = ("na", "нечего проверять: нет активных объявлений")
 IDLE = "кабинет не откручивает: нет живых групп"
+IDLE_SPENT = "нет живых групп — общий балл не считается"   # расход был, но у архивных групп
+NO_SPEND = ("na", "нет расхода за период")
 
 
 def _unknown(label):
@@ -64,6 +67,10 @@ def run_checks(ds: dict, th: dict, findings: list, evaluated: dict | None = None
     no_banners = ("unknown", "объявления не собирались") if not cov.get("banners") else OK
     no_stats = ("unknown", "статистика не собрана") if not cov.get("stats", True) else OK
     banners_gate = NO_ACTIVE_BANNERS if not banners else OK   # объявления собраны, активных нет
+    measured = _measured(ds)
+    # расход живых групп известен и равен 0: правила по расходу проверять не на чем (как B3)
+    no_spend = NO_SPEND if ds.get("zero_spend") or (measured and not sum(g["stats"]["spent"] for g in measured)) \
+        else OK
 
     def add(cid, title, status, reason=""):
         rows.append({"id": cid, "block": cid[0], "title": title, "status": status, "reason": reason})
@@ -132,8 +139,9 @@ def run_checks(ds: dict, th: dict, findings: list, evaluated: dict | None = None
     by_rules("B2", "Есть тёплый, LAL и холодный слои", ["layer_missing", "no_retargeting"], layer_gate)
     spend = sum(g["stats"]["spent"] for g in all_live)
     by_rules("B3", "Доли бюджета по слоям", ["layer_share"],   # правило — по всем живым группам с расходом
-             _first(no_live, OK if any(_layer(g) is not None for g in all_live) else layer_gate,
-                    OK if spend else ("na", "нет расхода за период")))
+             _first(no_live, OK if any(_layer(g) is not None for g in all_live)
+                    else ("unknown", "слои аудиторий не определены — таргетинги не получены"),
+                    OK if spend else NO_SPEND))
     by_rules("B4", "1 сегмент = 1 кампания", ["mixed_plan"], layer_gate)
     by_rules("B5", "Нет дробления на мелкие группы", ["fragmentation"], no_active)
     plans_known = any(p.get("has_budget") is not None for p in ds["plans"])
@@ -205,7 +213,8 @@ def run_checks(ds: dict, th: dict, findings: list, evaluated: dict | None = None
     e1_gate = _first(banner_base, content_gate, OK if classified else ("unknown", "форматы объявлений не определены"))
     unread = sum(1 for b in banners if b.get("ratios_unknown"))
     if not e1_gate[0] and unread and not fired.get("missing_ratios"):
-        e1_gate = ("unknown", f"соотношение сторон не читается из роли контента у {unread} объявлений")
+        e1_gate = ("unknown", f"соотношение сторон не читается из роли контента у {unread} "
+                   f"{plural(unread, 'объявления', 'объявлений', 'объявлений')}")
     by_rules("E1", "Все соотношения сторон 1:1, 4:5, 16:9, 9:16", ["missing_ratios"], e1_gate)
     by_rules("E2", "Видео используется", ["no_video"], _first(banner_base, content_gate))
     by_rules("E3", "Креативов в группе 2–5", ["banners_per_group", "no_active_banners"],
@@ -241,13 +250,16 @@ def run_checks(ds: dict, th: dict, findings: list, evaluated: dict | None = None
     # F
     by_rules("F1", "CTR не ниже 0,3 %", ["low_ctr"], _first(no_live, no_stats))
     by_rules("F2", "Нет CPC-выбросов", ["cpc_outlier"], _first(no_live, no_stats))
-    eligible = [g for g in live if not g.get("stats_missing") and _run_days(ds, g) >= th["min_run_days"]
+    # те же группы, что судит правило burnout: все живые с полученной статистикой (и паузные)
+    eligible = [g for g in measured if _run_days(ds, g) >= th["min_run_days"]
                 and g["stats"]["shows"] >= th["burnout_min_shows"]]
     if no_live[0] or no_stats[0] or fired.get("burnout"):
         by_rules("F3", "Нет выгорания (частота)", ["burnout"], _first(no_live, no_stats))  # находка не прячется
-    elif any(g.get("stats_missing") for g in live):
+    elif any(g.get("stats_missing") for g in all_live):
         add("F3", "Нет выгорания (частота)", "unknown", "статистика получена не по всем группам")
-    elif not eligible or any(g["stats"].get("frequency") is None for g in eligible):
+    elif not eligible:
+        add("F3", "Нет выгорания (частота)", "na", "нечего проверять: нет групп с достаточными показами")
+    elif any(g["stats"].get("frequency") is None for g in eligible):
         add("F3", "Нет выгорания (частота)", "unknown",
             "частота за период не определена: охват и частота доступны только за всё время жизни группы")
     else:
@@ -255,12 +267,19 @@ def run_checks(ds: dict, th: dict, findings: list, evaluated: dict | None = None
     long_enough = ds["period"]["days"] >= 30
     by_rules("F4", "Динамика CPA за 7 / 30 дней", ["cpa_trend"],
              _first(no_active, no_stats, OK if long_enough else ("unknown", "период аудита короче 30 дней")))
-    early = sum(1 for g in live if _run_days(ds, g) < th["min_run_days"]) + \
-        sum(1 for b in banners if b.get("age_days") is not None and b["age_days"] < th["min_run_days"])
-    add("F5", "Решения не раньше 7 дней работы", "na",
-        no_active[1] if no_active[0] else
-        (f"рано судить: {early} групп и объявлений моложе 7 дней" if early else "все работают 7+ дней"))
-    by_rules("F6", "Расход приносит конверсии", ["spend_no_conversions", "cpa_above_target"], _first(no_live, no_stats))
+    young_g = sum(1 for g in live if _run_days(ds, g) < th["min_run_days"])
+    young_b = sum(1 for b in banners if b.get("age_days") is not None and b["age_days"] < th["min_run_days"])
+    young = [f"{n} {plural(n, *forms)}" for n, forms in ((young_g, ("группа", "группы", "групп")),
+                                                        (young_b, ("объявление", "объявления", "объявлений"))) if n]
+    if no_active[0]:
+        f5_reason = no_active[1]
+    elif ds.get("zero_spend") or not any(g["stats"]["shows"] for g in live):
+        f5_reason = "нет показов за период"   # «моложе 7 дней» по нулям было бы неправдой
+    else:
+        f5_reason = "рано судить: моложе 7 дней — " + " и ".join(young) if young else "все работают 7+ дней"
+    add("F5", "Решения не раньше 7 дней работы", "na", f5_reason)
+    by_rules("F6", "Расход приносит конверсии", ["spend_no_conversions", "cpa_above_target"],
+             _first(no_live, no_stats, no_spend))
 
     # G
     metrika_gate = OK if cov.get("metrika") else ("unknown", "Метрика не подключена")
@@ -279,5 +298,6 @@ def run_checks(ds: dict, th: dict, findings: list, evaluated: dict | None = None
         blocks.append({"id": bid, "title": title, "checks": checks, "score": [n, m]})
     out = {"blocks": blocks, "total": [sum(b["score"][0] for b in blocks), sum(b["score"][1] for b in blocks)]}
     if not all_live:   # нет живых групп — общий балл ничего не значит
-        out["total"], out["idle"] = None, IDLE
+        out["total"] = None
+        out["idle"] = IDLE_SPENT if ds["totals"]["spent"] else IDLE
     return out
