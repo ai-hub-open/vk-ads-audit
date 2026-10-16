@@ -815,3 +815,30 @@ def test_finding_on_paused_group_says_paused():
     assert fs[2]["action"].startswith("Группа сейчас на паузе (кампания остановлена).")
     worse = make_group(3, stats=stats(9000, 90000, 900, 30), daily=daily(30, 300.0, 3000, 30, 1))
     assert not found(make_ds([worse] + olds), "cpa_above_target")[0]["action"].startswith("Группа сейчас")
+
+
+# ==== Повторное ревью ====
+
+def _two_goals():
+    site = [make_group(i, stats=stats(1000, 10000, 100, 10), daily=daily()) for i in (1, 2, 3)]       # CPA 100
+    lead = make_group(4, objective="leadads", stats=stats(600, 1000, 10, 2), daily=daily())          # опорного нет
+    return make_ds(site + [lead])
+
+
+def test_header_names_objective_when_only_one_has_reference():
+    from scripts.render_report import render
+    ds = _two_goals()
+    head = render(ds, {**res(ds), "checklist": checklist(ds)}).split("Чек-лист")[0]
+    assert "опорный CPA: конверсии на сайте — 100 ₽; у остальных целей опорного нет" in head
+    assert "((" not in head and "))" not in head
+
+
+def test_cpa_tile_not_mixed_across_objectives():
+    from scripts.render_report import render
+    ds = _two_goals()
+    head = render(ds, {**res(ds), "checklist": checklist(ds)}).split("Чек-лист")[0]
+    assert "CPA (разные цели — см. по целям)<b>—</b>" in head
+    assert "CPA по целям: конверсии на сайте — 100 ₽ · лид-формы — 300 ₽" in head
+    one = make_ds([make_group(1, stats=stats(1000, 10000, 100, 10))], totals=stats(1000, 10000, 100, 10))
+    h1 = render(one, {**res(one), "checklist": checklist(one)}).split("Чек-лист")[0]
+    assert "CPA<b>100 ₽</b>" in h1 and "CPA по целям" not in h1

@@ -282,27 +282,39 @@ def _objective_label(obj) -> str:
     return OBJECTIVE_LABELS.get(obj) or (f"другая цель ({obj})" if obj else "цель не указана")
 
 
-def _conversions_by_objective(ds) -> dict:
-    """Конверсии по целям групп, входящих в итоги (кроме удалённых): «Результат» у каждой цели свой."""
+def _by_objective(ds) -> dict:
+    """{цель: [расход, конверсии]} по группам, входящим в итоги (кроме удалённых): «Результат» у каждой цели свой."""
     out: dict = {}
     for g in ds["groups"]:
         if g["status"] != "deleted" and (g["stats"]["spent"] or g["stats"]["conversions"]):
-            key = _objective_label(g.get("objective"))
-            out[key] = out.get(key, 0) + g["stats"]["conversions"]
+            acc = out.setdefault(_objective_label(g.get("objective")), [0.0, 0])
+            acc[0] += g["stats"]["spent"]
+            acc[1] += g["stats"]["conversions"]
     return out
 
 
-def _ref_text(findings) -> str:
-    """Опорный CPA в шапке; несколько целей — у каждой свой (медиана внутри цели)."""
+def _conversions_by_objective(ds) -> dict:
+    return {k: v[1] for k, v in _by_objective(ds).items()}
+
+
+def _cpa_by_objective(ds) -> dict:
+    """CPA внутри каждой цели (расход / её результат); результата нет — «—»."""
+    return {k: (round(s / c, 2) if c else None) for k, (s, c) in _by_objective(ds).items()}
+
+
+def _ref_text(findings, n_objectives: int = 1) -> str:
+    """Опорный CPA в шапке; несколько целей — у каждой свой (медиана внутри цели), у какой его нет — так и сказано."""
     source = findings.get("ref_source", "none")
     by_obj = findings.get("ref_by_objective") or {}
     if source == "target":
         return f"опорный CPA: {fmt_rub(findings.get('ref_cpa'))} (целевой CPA клиента)"
-    if len(by_obj) > 1:
+    if n_objectives > 1 and by_obj:
         parts = ", ".join(f"{_objective_label(k)} — {fmt_rub(v)}" for k, v in by_obj.items())
-        return f"опорный CPA по целям: {parts} (медиана CPA групп той же цели, цель не задана)"
+        rest = "; у остальных целей опорного нет" if len(by_obj) < n_objectives else ""
+        head = "опорный CPA по целям" if len(by_obj) > 1 else "опорный CPA"
+        return f"{head}: {parts}{rest} (медиана CPA групп той же цели, целевой CPA не задан)"
     if source == "median":
-        return f"опорный CPA: {fmt_rub(findings.get('ref_cpa'))} (медиана CPA групп кабинета (цель не задана))"
+        return f"опорный CPA: {fmt_rub(findings.get('ref_cpa'))} (медиана CPA групп кабинета, целевой CPA не задан)"
     return "опорный CPA: — (опорного CPA нет — пороги по минимальному расходу)"
 
 
@@ -374,10 +386,12 @@ def render(ds: dict, findings: dict, collect_log=None, title: str = "", th=None)
     th = th or load_thresholds()
     t = ds["totals"]
     by_obj = _conversions_by_objective(ds)
-    conv_label = "Конверсии (сумма результатов разных целей)" if len(by_obj) > 1 else "Конверсии"
+    mixed = len(by_obj) > 1   # результаты разных целей в разных единицах: общий CPA не считаем
+    conv_label = "Конверсии (сумма результатов разных целей)" if mixed else "Конверсии"
+    cpa_tile = ("CPA (разные цели — см. по целям)", "—") if mixed else ("CPA", fmt_rub(t["cpa"]))
     tiles = [("Расход", fmt_rub(t["spent"])), ("Показы", _num(t["shows"])), ("Клики", _num(t["clicks"])),
-             (conv_label, _num(t["conversions"])), ("CPA", fmt_rub(t["cpa"])), ("CTR", fmt_pct(t["ctr_pct"]))]
-    ref_text = _ref_text(findings)
+             (conv_label, _num(t["conversions"])), cpa_tile, ("CTR", fmt_pct(t["ctr_pct"]))]
+    ref_text = _ref_text(findings, len(by_obj))
     parts = [f"<!doctype html><html lang='ru'><head><meta charset='utf-8'>"
              f"<title>Аудит VK Рекламы {escape(title)}</title><style>{CSS}</style></head><body>",
              f"<h1>Аудит VK Рекламы {escape(title)}</h1>",
@@ -388,7 +402,10 @@ def render(ds: dict, findings: dict, collect_log=None, title: str = "", th=None)
              "<div class='tiles'>" + "".join(f"<div class='tile'>{k}<b>{v}</b></div>" for k, v in tiles) + "</div>",
              _conversion_source_html(t),
              (f"<p class='muted'>Конверсии по целям: {escape(' · '.join(f'{k} — {_num(v)}' for k, v in by_obj.items()))}"
-              "</p>" if len(by_obj) > 1 else ""),
+              "</p>" if mixed else ""),
+             (f"<p class='muted'>CPA по целям: "
+              f"{escape(' · '.join(f'{k} — {fmt_rub(v)}' for k, v in _cpa_by_objective(ds).items()))}</p>"
+              if mixed else ""),
              _metrika_total_html(ds.get("metrika_total")),
              _checklist_html(findings.get("checklist")),
              _ord_status_html(ds, th),
