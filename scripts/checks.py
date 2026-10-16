@@ -170,10 +170,17 @@ def run_checks(ds: dict, th: dict, findings: list, evaluated: dict | None = None
     present("C4", "Сообщества", any(_feat(g).get("has_communities") for g in live),
             _first(no_active, _known_feature(live, "has_communities", "сообщества")))
     present("C5", "Пользовательские аудитории", any(g["segment_ids"] for g in live), targeting_gate)
-    present("C6", "Ключевые фразы", any(_feat(g).get("has_keywords") for g in live),
-            _first(no_active, _known_feature(live, "has_keywords", "ключевые фразы")))
     kw = [g for g in live if _feat(g).get("has_keywords")]
-    kw_gate = _first(no_active, ("na", "ключевые фразы не используются") if not kw else OK)
+    # Третий живой прогон: фразы стоят в таргетинге сегментом (relation remarketing_search_phrases), их параметры
+    # (минус-фразы, период, расширение) хранятся в сегменте и MCP их не отдаёт — C7–C9 «нет данных», не ❌.
+    kw_seg = [g for g in live if g.get("keyword_segment_ids")]
+    if kw_seg and not kw and not no_active[0]:
+        add("C6", "Ключевые фразы", "pass", "используются (через сегменты ключевых фраз)")
+    else:
+        present("C6", "Ключевые фразы", bool(kw),
+                _first(no_active, OK if kw_seg else _known_feature(live, "has_keywords", "ключевые фразы")))
+    kw_gate = _first(no_active, OK if kw else ("unknown", "параметры фраз хранятся в сегменте, MCP их не отдаёт")
+                     if kw_seg else ("na", "ключевые фразы не используются"))
     by_rules("C7", "Минус-фразы", ["no_minus_phrases"], kw_gate if kw_gate[0] else _known_feature(kw, "has_minus", "минус-фразы"))
     by_rules("C8", "Период поиска 7–12 дней", ["kw_period"], kw_gate if kw_gate[0] else _known_feature(kw, "kw_period", "период поиска"))
     by_rules("C9", "Расширение списка ключевых фраз", ["kw_expand_off"],

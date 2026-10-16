@@ -263,3 +263,38 @@ def test_layer_share_with_guessed_layers_is_low_confidence_and_b3_unknown():
     assert b3["status"] == "unknown" and "relations" in b3["reason"]
     sure = make_ds([make_group(1, layer="warm", segment_ids=[1], stats=stats(9000, 90000, 900, 90)), g2])
     assert row(checklist(sure), "B3")["status"] == "fail" and found(sure, "layer_share")[0]["confidence"] == "high"
+
+
+# ---- 2.2. Ключевые фразы через сегменты ----
+
+KW_SEG = "параметры фраз хранятся в сегменте, MCP их не отдаёт"
+
+
+def test_c6_pass_via_keyword_segments_and_c7_c9_unknown():
+    g = make_group(1, layer="cold", layer_subtype="keywords", segment_ids=[3], keyword_segment_ids=[3])
+    cl = checklist(make_ds([g, make_group(2)]))
+    c6 = row(cl, "C6")
+    assert c6["status"] == "pass" and c6["reason"] == "используются (через сегменты ключевых фраз)"
+    for cid in ("C7", "C8", "C9"):
+        assert (row(cl, cid)["status"], row(cl, cid)["reason"]) == ("unknown", KW_SEG), cid
+
+
+def test_keyword_segment_only_in_paused_group_does_not_count():
+    g = make_group(1, status="blocked", segment_ids=[3], keyword_segment_ids=[3])
+    cl = checklist(make_ds([g, make_group(2)]))
+    assert row(cl, "C6")["status"] == "unknown"                  # поле фраз не получено — как раньше
+    assert row(cl, "C7")["status"] == "na"
+
+
+def test_no_phrases_at_all_unchanged():
+    gs = [make_group(1, features={"has_keywords": False, "has_minus": None})]
+    cl = checklist(make_ds(gs))
+    assert row(cl, "C6")["status"] == "fail" and row(cl, "C7")["reason"] == "ключевые фразы не используются"
+
+
+def test_direct_keywords_keep_their_checks_next_to_segments():
+    g1 = make_group(1, features={"has_keywords": True, "has_minus": False})
+    g2 = make_group(2, segment_ids=[3], keyword_segment_ids=[3], layer="cold", layer_subtype="keywords")
+    ds = make_ds([g1, g2])
+    assert found(ds, "no_minus_phrases") and row(checklist(ds), "C7")["status"] == "fail"
+    assert row(checklist(ds), "C6")["status"] == "pass"
