@@ -349,3 +349,117 @@ def test_unused_segments_counts_only_unused_and_plural():
     assert f[0]["evidence"] == {"segments_unused": 1, "only_in_deleted_or_archived_groups": 0, "examples": [7]}
     used = make_ds([make_group(1, segment_ids=[5])], segments=[{"id": 5, "name": "a"}])
     assert found(used, "unused_segments") == []
+
+
+# ---- 1. кабинет без живых групп: «— нечего проверять», а не ложные «поле не получено» ----
+
+NO_ACTIVE = "нечего проверять: нет активных групп"
+
+
+class DeadCabinet(FakeClient):
+    """Второй живой прогон: все группы удалены, кампании и сегменты остались, базы старые."""
+
+    def paginate(self, tool, arguments=None, **kw):
+        if tool == "vk_ads_ad_plans_list":
+            self._check(tool, arguments)
+            return [{"id": 7, "name": "Кампания 1", "status": "active", "budget_limit_day": 0}]
+        if tool == "vk_ads_remarketing_segments_list":
+            self._check(tool, arguments)
+            return [{"id": 500 + i, "name": f"Посетители {i}"} for i in range(4)]
+        if tool == "vk_ads_users_lists_list":
+            self._check(tool, arguments)
+            return [{"id": 9, "name": "Клиенты", "updated": "2025-01-01 00:00:00"}]
+        if tool == "vk_ads_remarketing_pixels_list":
+            self._check(tool, arguments)
+            return [{"id": 1, "name": "px"}]
+        return super().paginate(tool, arguments, **kw)
+
+
+def _dead_dataset(tmp_path):
+    gs = [{"id": i, "name": f"Группа {i}", "status": "deleted", "ad_plan_id": 7, "objective": "site_conversions",
+           "targetings": {"geo": {"regions": [1]}, "segments": [500, 501]}, "issues": [{"code": "ARCHIVED"}]}
+          for i in range(1, 4)]
+    client = DeadCabinet(gs)
+    log = collect(client, tmp_path / "raw", "2026-09-01", "2026-09-30")
+    assert not tools(client, "vk_ads_banners_list") and not tools(client, "vk_ads_statistics_day")
+    return build_dataset(tmp_path / "raw", *D, collect_log=log), log
+
+
+def test_dead_cabinet_every_check_is_nothing_to_check(tmp_path):
+    ds, _ = _dead_dataset(tmp_path)
+    cl = checklist(ds)
+    rows = [c for b in cl["blocks"] for c in b["checks"]]
+    assert {c["status"] for c in rows} == {"na"}, [(c["id"], c["status"], c["reason"]) for c in rows
+                                                   if c["status"] != "na"]
+    for c in rows:
+        if c["id"] != "C13":                                         # LAL-сегментов нет — своя причина
+            assert "нет активных групп" in c["reason"], (c["id"], c["reason"])
+    assert row(cl, "F5")["reason"] == NO_ACTIVE
+
+
+def test_dead_cabinet_total_score_hidden(tmp_path):
+    ds, _ = _dead_dataset(tmp_path)
+    cl = checklist(ds)
+    assert cl["total"] is None and cl["idle"] == "кабинет не откручивает: нет живых групп"
+
+
+def test_dead_cabinet_no_false_findings_or_limitations(tmp_path):
+    from scripts.render_report import limitations, render
+    ds, log = _dead_dataset(tmp_path)
+    r = res(ds)
+    assert {f["rule"] for f in r["findings"]} == {"unused_segments"}       # нет «база устарела» и «названия»
+    cl = checklist(ds)
+    lines = limitations(ds, log, cl)
+    for bad in ("Не проверено", "Объявления не собирались", "Статистика за период не собрана",
+                "объявления разобраны только"):
+        assert not any(bad in x for x in lines), bad
+    html = render(ds, {**r, "checklist": cl})
+    assert "кабинет не откручивает" in html and "общий балл" not in html
+
+
+def test_diagnose_cli_prints_idle_instead_of_score(tmp_path, capsys):
+    import json
+    from scripts.diagnose import main as diag_main
+    ws = tmp_path / "ws"
+    ds, _ = _dead_dataset(ws)
+    (ws / "dataset.json").write_text(json.dumps(ds, ensure_ascii=False), encoding="utf-8")
+    assert diag_main(["--workspace", str(ws)]) == 0
+    out = capsys.readouterr().out
+    assert "кабинет не откручивает" in out and "балл" not in out
+
+
+def test_paused_only_groups_checks_say_no_active_groups():
+    g = make_group(1, status="blocked", features={"keys": ["geo"]})
+    cl = checklist(make_ds([g], [make_banner(11, 1, status="blocked")]))
+    for cid in ("A1", "A2", "A3", "B2", "C1", "C10", "C11", "C15", "C16", "D1", "D3", "E1", "E3", "F4", "G1"):
+        assert (row(cl, cid)["status"], row(cl, cid)["reason"]) == ("na", NO_ACTIVE), cid
+    assert cl["total"] is not None                                    # живая группа есть — балл показываем
+
+
+def test_na_gate_never_hides_a_real_finding():
+    g = make_group(1, status="blocked")
+    rejected = make_banner(11, 1, status="blocked", moderation_status="banned")
+    cl = checklist(make_ds([g], [rejected]))
+    assert row(cl, "E8")["status"] == "fail"                          # отклонённое в паузной группе — ❌ остаётся
+
+
+def test_active_groups_without_active_banners():
+    g = make_group(1)
+    cl = checklist(make_ds([g], [make_banner(11, 1, status="blocked"), make_banner(12, 1, status="blocked")]))
+    for cid in ("A2", "A3", "E1", "E2", "E4", "E5", "E6", "E7"):
+        assert (row(cl, cid)["status"], row(cl, cid)["reason"]) == ("na", "нечего проверять: нет активных объявлений"), cid
+    assert row(cl, "E3")["status"] == "fail"                          # «группа включена, крутить нечего» — 🟠 остаётся
+
+
+def test_naming_counts_only_live_groups_and_their_plans():
+    live = make_group(1, name="холод_велоспорт_Мск_25-45", ad_plan_id=7)
+    dead = [make_group(i, name=f"Группа {i}", status="deleted", ad_plan_id=8) for i in range(2, 9)]
+    plans = [{"id": 7, "name": "холод_интересы_Мск", "status": "active", "budget_day_rub": None,
+              "budget_total_rub": None, "has_budget": None},
+             {"id": 8, "name": "Кампания 1", "status": "active", "budget_day_rub": None, "budget_total_rub": None,
+              "has_budget": None}]
+    ds = make_ds([live] + dead, plans=plans)
+    assert found(ds, "naming") == [] and row(checklist(ds), "B7")["status"] == "pass"
+    only_dead = make_ds(dead, plans=plans)
+    assert found(only_dead, "naming") == []
+    assert (row(checklist(only_dead), "B7")["status"], row(checklist(only_dead), "B7")["reason"]) == ("na", NO_ACTIVE)

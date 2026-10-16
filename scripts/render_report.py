@@ -18,11 +18,13 @@ try:
     from scripts._console import setup_console
     from scripts._workspace import resolve_workspace
     from scripts.diagnose import _banners, bidding_label, load_thresholds, utm_unconfirmed_groups, utm_unconfirmed_text
+    from scripts.features import is_live_group
     from scripts.raw_store import mark_recovered
 except ImportError:  # запуск напрямую
     from _console import setup_console
     from _workspace import resolve_workspace
     from diagnose import _banners, bidding_label, load_thresholds, utm_unconfirmed_groups, utm_unconfirmed_text
+    from features import is_live_group
     from raw_store import mark_recovered
 
 LEVELS = [("red", "🔴 Срезать слив"), ("orange", "🟠 Починить"), ("green", "🟢 Масштабировать"),
@@ -79,10 +81,12 @@ def limitations(ds: dict, collect_log=None, checklist=None, th=None) -> list:
     lines = list(ALWAYS_LIMITATIONS)
     cov = ds["coverage"]
     lines.extend(ds.get("notes") or [])
-    if cov["path"] == "A":
+    any_live = any(is_live_group(g) for g in ds["groups"])          # все группы удалены — собирать было нечего
+    measured = any(g["status"] != "deleted" for g in ds["groups"])  # статистику берём и у архивных
+    if cov["path"] == "A" and any_live:
         lines.append("Данные собраны через модель (путь A): объявления разобраны только у групп "
                      "с наибольшим расходом.")
-    if not cov["banners"]:
+    if not cov["banners"] and any_live:
         lines.append("Объявления не собирались — выводы на уровне групп.")
     if not cov["metrika"]:
         lines.append("Метрика не подключена: поведение на сайте после клика не проверялось.")
@@ -99,7 +103,7 @@ def limitations(ds: dict, collect_log=None, checklist=None, th=None) -> list:
         lines.append("Нет доступа к базам клиентов: проверки, зависящие от баз, не выполнялись.")
     if any(c.get("superseded") for c in calls):
         lines.append("Расширенные поля не приняты сервером — часть проверок (маркировка, UTM, кнопки) не проверена")
-    if not cov.get("stats", True):
+    if not cov.get("stats", True) and measured:
         lines.append("Статистика за период не собрана — выводы по расходу и результату недоступны.")
     if not cov.get("pixels", True):
         lines.append("Пиксели кабинета не проверялись.")
@@ -141,8 +145,11 @@ def _metrika_total_html(total) -> str:
 def _checklist_html(cl) -> str:
     if not cl:
         return ""
-    n, m = cl["total"]
-    parts = [f"<h2>Чек-лист аудита — общий балл <span class='score'>{n} / {m}</span></h2>"]
+    if cl.get("total") is None:   # нет живых групп — балл не считаем
+        parts = [f"<h2>Чек-лист аудита — {escape(cl.get('idle') or 'балл не считается')}</h2>"]
+    else:
+        n, m = cl["total"]
+        parts = [f"<h2>Чек-лист аудита — общий балл <span class='score'>{n} / {m}</span></h2>"]
     for b in cl["blocks"]:
         bn, bm = b["score"]
         rows = "".join(

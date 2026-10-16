@@ -530,7 +530,8 @@ def no_cbo(ds, th, ctx):
 @rule
 def naming(ds, th, ctx):
     pats = [re.compile(p, re.I) for p in th["default_name_patterns"]]
-    names = ([p["name"] for p in ds["plans"] if p.get("status") != "deleted"]
+    live_plans = {g.get("ad_plan_id") for g in _live(ds)}   # кампании только с удалёнными группами — не в счёт
+    names = ([p["name"] for p in ds["plans"] if p.get("status") != "deleted" and p.get("id") in live_plans]
              + [g["name"] for g in _live(ds)]
              + [b["name"] for b in _banners(ds) if b["status"] != "deleted"])
     names = [n.strip() for n in names if n and n.strip()]  # пустые названия не считаем ни плохими, ни в общем числе
@@ -662,9 +663,12 @@ def lal_small_source(ds, th, ctx):
 def _referenced_list_ids(ds, th):
     """id баз, на которые ссылаются сегменты живых активных групп (цель или исключение);
     None — связь «база → сегмент» в данных не получена."""
+    active = [g for g in _live(ds) if _active(g, th)]
+    if not active:   # нет активных групп — ни одна база ни в чьём таргетинге не стоит
+        return set()
     if not ds.get("segment_relations_known"):
         return None
-    used = {i for g in _live(ds) if _active(g, th)
+    used = {i for g in active
             for i in list(g["segment_ids"]) + list(g.get("excluded_segment_ids") or [])}
     return {lid for s in ds["segments"] if s["id"] in used for lid in (s.get("list_ids") or [])}
 
@@ -734,6 +738,8 @@ def _content_groups(ds, th):
 def missing_ratios(ds, th, ctx):
     out = []
     for g, active in _content_groups(ds, th):
+        if not active:   # активных объявлений нет — форматов нет вовсе, это находка no_active_banners, а не E1
+            continue
         if any(not b.get("content_ids") or not (b.get("ratios") or b.get("has_video")) or b.get("ratios_unknown")
                for b in active):
             continue   # не все объявления с контентом и классифицированы (или соотношение не читается) — молчим
@@ -1237,8 +1243,10 @@ def main(argv=None) -> int:
     counts = defaultdict(int)
     for f in result["findings"]:
         counts[f["level"]] += 1
+    total = result["checklist"]["total"]
+    score = result["checklist"].get("idle") if total is None else f"балл {total[0]} / {total[1]}"
     print(f"находок: {len(result['findings'])} ({dict(counts)}), опорный CPA: {result['ref_cpa']} "
-          f"({result['ref_source']}), балл {result['checklist']['total'][0]} / {result['checklist']['total'][1]}")
+          f"({result['ref_source']}), {score}")
     return 0
 
 
