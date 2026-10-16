@@ -16,12 +16,12 @@ try:
     from scripts._console import setup_console
     from scripts._workspace import resolve_workspace
     from scripts.features import is_live_group, plural
-    from scripts.normalize import aggregate
+    from scripts.normalize import aggregate, zero_spend_head
 except ImportError:  # запуск напрямую
     from _console import setup_console
     from _workspace import resolve_workspace
     from features import is_live_group, plural
-    from normalize import aggregate
+    from normalize import aggregate, zero_spend_head
 
 SPIKE = 1.5
 CPA_JUMP = 1.5
@@ -80,7 +80,9 @@ def quick_summary(ds: dict, day: str, target_cpa=None) -> dict:
 
     lines = [f"📅 VK Реклама — {d.strftime('%d.%m.%Y')}"]
     if not has_today:
-        lines.append("Данных за этот день нет — возможно, статистика ещё не пришла.")
+        # 0 ₽ подтверждён: VK не отдаёт строк для сущностей без показов — «статистика не пришла» было бы неправдой
+        lines.append(zero_spend_head(ds, short=True) + "." if ds.get("zero_spend")
+                     else "Данных за этот день нет — возможно, статистика ещё не пришла.")
         return {"day": day, "today": today, "prev_total": prev_total, "prev_days": prev_day_count,
                 "groups": groups, "lines": lines[:MAX_LINES]}
 

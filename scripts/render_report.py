@@ -19,12 +19,14 @@ try:
     from scripts._workspace import resolve_workspace
     from scripts.diagnose import _banners, bidding_label, load_thresholds, utm_unconfirmed_groups, utm_unconfirmed_text
     from scripts.features import is_live_group
+    from scripts.normalize import zero_spend_head
     from scripts.raw_store import mark_recovered
 except ImportError:  # запуск напрямую
     from _console import setup_console
     from _workspace import resolve_workspace
     from diagnose import _banners, bidding_label, load_thresholds, utm_unconfirmed_groups, utm_unconfirmed_text
     from features import is_live_group
+    from normalize import zero_spend_head
     from raw_store import mark_recovered
 
 LEVELS = [("red", "🔴 Срезать слив"), ("orange", "🟠 Починить"), ("green", "🟢 Масштабировать"),
@@ -53,17 +55,8 @@ ZERO_SPEND_TAIL = " — выводов по расходу и результат
 
 
 def zero_spend_text(ds: dict) -> str:
-    """Плашка «0 ₽»: про весь кабинет говорим, только если предполётка подтвердила 0 ₽; иначе — про живые группы."""
-    acc = ds.get("account_spent")
-    if acc is None:
-        return "Расход живых групп за период 0 ₽ (расход всего кабинета не проверялся)" + ZERO_SPEND_TAIL
-    if acc == 0:
-        return "Расход кабинета за период 0 ₽: группы есть, но не откручивали" + ZERO_SPEND_TAIL
-    archived = round(sum(g["stats"]["spent"] for g in ds["groups"] if g["status"] != "deleted"), 2)  # живые — 0
-    deleted = round(max(acc - archived, 0.0), 2)
-    parts = ([f"{fmt_rub(deleted)} пришлось на удалённые группы"] if deleted else []) + \
-        ([f"{fmt_rub(archived)} — на архивные группы"] if archived else [])
-    return "Живые группы за период не откручивали" + ("; " + "; ".join(parts) if parts else "") + ZERO_SPEND_TAIL
+    """Плашка «0 ₽» (формулировки — normalize.zero_spend_head, общие с быстрым анализом)."""
+    return zero_spend_head(ds) + ZERO_SPEND_TAIL
 STATUS_ICON = {"pass": "✅", "fail": "❌", "unknown": "—", "na": "—", "ask": "❓", "potential": "🟢"}
 STATUS_CLASS = {"pass": "pass", "fail": "fail", "unknown": "unk", "na": "unk", "ask": "unk", "potential": "pot"}
 

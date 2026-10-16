@@ -139,9 +139,9 @@ def run_checks(ds: dict, th: dict, findings: list, evaluated: dict | None = None
     by_rules("B2", "Есть тёплый, LAL и холодный слои", ["layer_missing", "no_retargeting"], layer_gate)
     spend = sum(g["stats"]["spent"] for g in all_live)
     by_rules("B3", "Доли бюджета по слоям", ["layer_share"],   # правило — по всем живым группам с расходом
-             _first(no_live, OK if any(_layer(g) is not None for g in all_live)
-                    else ("unknown", "слои аудиторий не определены — таргетинги не получены"),
-                    OK if spend else NO_SPEND))
+             _first(no_live, no_stats, OK if spend else NO_SPEND,   # нет расхода — раньше слоёв
+                    OK if any(_layer(g) is not None for g in all_live)
+                    else ("unknown", "слои аудиторий не определены — таргетинги не получены")))
     by_rules("B4", "1 сегмент = 1 кампания", ["mixed_plan"], layer_gate)
     by_rules("B5", "Нет дробления на мелкие группы", ["fragmentation"], no_active)
     plans_known = any(p.get("has_budget") is not None for p in ds["plans"])
@@ -271,13 +271,16 @@ def run_checks(ds: dict, th: dict, findings: list, evaluated: dict | None = None
     young_b = sum(1 for b in banners if b.get("age_days") is not None and b["age_days"] < th["min_run_days"])
     young = [f"{n} {plural(n, *forms)}" for n, forms in ((young_g, ("группа", "группы", "групп")),
                                                         (young_b, ("объявление", "объявления", "объявлений"))) if n]
+    f5_status = "na"
     if no_active[0]:
         f5_reason = no_active[1]
+    elif no_stats[0]:   # статистики нет — про показы ничего не известно
+        f5_status, f5_reason = no_stats
     elif ds.get("zero_spend") or not any(g["stats"]["shows"] for g in live):
-        f5_reason = "нет показов за период"   # «моложе 7 дней» по нулям было бы неправдой
+        f5_reason = "у активных групп нет показов за период"   # «моложе 7 дней» по нулям было бы неправдой
     else:
         f5_reason = "рано судить: моложе 7 дней — " + " и ".join(young) if young else "все работают 7+ дней"
-    add("F5", "Решения не раньше 7 дней работы", "na", f5_reason)
+    add("F5", "Решения не раньше 7 дней работы", f5_status, f5_reason)
     by_rules("F6", "Расход приносит конверсии", ["spend_no_conversions", "cpa_above_target"],
              _first(no_live, no_stats, no_spend))
 

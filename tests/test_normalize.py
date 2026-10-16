@@ -85,7 +85,7 @@ def test_build_dataset(tmp_path):
     assert ds["totals"]["spent"] == 900.0
     assert ds["coverage"] == {"path": "B", "banners": True, "summary": True, "stats": True,
                               "pixels": False, "metrika": False, "banner_groups": [1],
-                              "users_lists": False, "users_lists_no_access": False}
+                              "users_lists": False, "users_lists_no_access": False, "preflight_no_spend": False}
     assert check_sanity(ds) == []
 
 

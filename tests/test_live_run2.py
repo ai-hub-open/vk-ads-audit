@@ -583,7 +583,7 @@ def test_account_spent_from_log_or_raw_users_call(tmp_path):
 
 
 def _zero_ds(account_spent, archived_spent=0):
-    gs = [_zero_group(1)]
+    gs = [_zero_group(1), make_group(3, status="deleted")]   # удалённая группа есть — разницу можно ей приписать
     if archived_spent:
         gs.append(make_group(2, issues=["ARCHIVED"], stats=stats(archived_spent, 1000, 10, 0)))
     return make_ds(gs, zero_spend=True, account_spent=account_spent,
@@ -662,7 +662,8 @@ def test_senler_na_when_no_active_banners_but_unknown_when_not_collected():
 # ---- R6. F5 и падежи ----
 
 def test_f5_no_shows_and_plural():
-    assert row(checklist(make_ds([_zero_group(1)], zero_spend=True)), "F5")["reason"] == "нет показов за период"
+    assert row(checklist(make_ds([_zero_group(1)], zero_spend=True)), "F5")["reason"] == \
+        "у активных групп нет показов за период"   # повторное ревью: формулировка только про активные группы
     young = make_group(1, created="2026-09-27 00:00:00", stats=stats(300, 3000, 30, 1),
                        daily=[{"date": f"2026-09-{d}", **stats(100, 1000, 10, 0)} for d in (28, 29, 30)])
     assert row(checklist(make_ds([young])), "F5")["reason"] == "рано судить: моложе 7 дней — 1 группа"
@@ -724,3 +725,98 @@ def test_changelog_and_source_cleanups():
     assert "игнорирует период" not in log and "только за всё время, даты не передавать" in log
     src = (SKILL_ROOT / "scripts" / "render_report.py").read_text(encoding="utf-8")
     assert not [ln for ln in src.splitlines() if re.search(r"\S {8,}\S", ln)]
+
+
+# ======== повторное ревью fix/live-run-2 ========
+
+# ---- N1. быстрый анализ при подтверждённом 0 ₽ — честный текст, а не «статистика ещё не пришла» ----
+
+def _quick_zero(account_spent, groups_=None):
+    from scripts.quick import quick_summary
+    gs = groups_ or [_zero_group(1)]
+    for g in gs:
+        g["daily"] = []                         # VK не отдаёт строк для сущностей без показов
+    ds = make_ds(gs, zero_spend=True, account_spent=account_spent)
+    return quick_summary(ds, "2026-09-30")["lines"]
+
+
+def test_quick_zero_spend_wording_by_preflight():
+    assert "Кабинет за период не откручивал (0 ₽)." in _quick_zero(0.0)
+    assert "Живые группы за период не откручивали (0 ₽)." in _quick_zero(None)
+    lines = _quick_zero(1500.0, [_zero_group(1), make_group(2, status="deleted")])
+    assert any(x.startswith("Живые группы за период не откручивали; 1 500 ₽ пришлось на удалённые группы")
+               for x in lines)
+    assert not any("ещё не пришла" in x for x in _quick_zero(0.0))
+
+
+def test_quick_without_zero_spend_keeps_old_wording():
+    from scripts.quick import quick_summary
+    lines = quick_summary(make_ds([make_group(1)]), "2026-09-30")["lines"]
+    assert any("ещё не пришла" in x for x in lines)
+
+
+# ---- N2. F5: статистики нет — «не собрана»; нет показов — только про активные группы ----
+
+def test_f5_unknown_without_stats_and_narrow_no_shows():
+    no_stats = make_ds([make_group(1)], coverage={"path": "A", "banners": True, "summary": False, "stats": False,
+                                                 "pixels": True, "metrika": False})
+    c = row(checklist(no_stats), "F5")
+    assert (c["status"], c["reason"]) == ("unknown", "статистика не собрана")
+    paused_spent = make_group(2, status="blocked", stats=stats(500, 5000, 50, 1),
+                              daily=[{"date": "2026-09-10", **stats(500, 5000, 50, 1)}])
+    ds = make_ds([_zero_group(1), paused_spent])
+    assert row(checklist(ds), "F5")["reason"] == "у активных групп нет показов за период"
+
+
+# ---- N3. «на удалённые группы» — только если удалённые есть и статистика полная ----
+
+def test_zero_spend_text_attributes_to_deleted_only_when_sure():
+    from scripts.render_report import zero_spend_text
+    neutral = "Расход кабинета за период 1 500 ₽, у живых групп 0 ₽ — разложить разницу по группам не удалось"
+    no_deleted = make_ds([_zero_group(1)], zero_spend=True, account_spent=1500.0)
+    assert zero_spend_text(no_deleted).startswith(neutral)
+    missing = make_ds([_zero_group(1), make_group(2, status="deleted"),
+                       make_group(3, issues=["ARCHIVED"], stats_missing=True)], zero_spend=True, account_spent=1500.0)
+    assert zero_spend_text(missing).startswith(neutral)
+    sure = make_ds([_zero_group(1), make_group(2, status="deleted")], zero_spend=True, account_spent=1500.0)
+    assert zero_spend_text(sure).startswith("Живые группы за период не откручивали; 1 500 ₽ пришлось на удалённые")
+
+
+# ---- N4. расход предполётки — одна логика с collect.total_spend (верхний total при пустых items) ----
+
+def test_account_spent_reads_top_total_like_collect(tmp_path):
+    from scripts.raw_store import write_call
+    raw = tmp_path / "raw"
+    cabinet(raw, [_active(1)], daily={1: day_rows(2)})
+    write_call(raw, "vk_ads_statistics_day", {"entity": "users", "ids": "77", "date_from": D[0], "date_to": D[1],
+                                               "metrics": "base"},
+               {"items": [], "total": {"base": {"spent": "321.5"}}})
+    assert build_dataset(raw, *D)["account_spent"] == 321.5
+
+
+# ---- N5. B3: нет расхода раньше гейта слоёв ----
+
+def test_b3_no_spend_before_layer_gate():
+    c = row(checklist(make_ds([_zero_group(1, layer=None)], zero_spend=True)), "B3")
+    assert (c["status"], c["reason"]) == ("na", "нет расхода за период")
+
+
+# ---- N6. SKILL: код 3 без статистики архивных, тексты плашки ----
+
+def test_skill_mentions_no_stats_code_and_real_banner_texts():
+    assert "статистика по архивным не получена" in SKILL
+    for text in ("Расход кабинета за период 0 ₽", "Живые группы за период не откручивали",
+                 "Расход живых групп за период 0 ₽"):
+        assert text in SKILL, text
+    assert "плашкой «Расход за период 0 ₽»" not in SKILL
+
+
+# ---- N7. журнал с no_spend — код 5, а не «статистика не получена» ----
+
+def test_no_spend_in_log_is_idle_not_no_stats(tmp_path):
+    import json
+    ws = tmp_path / "ws"
+    cabinet(ws / "raw", [_active(1, issues=[{"code": "ARCHIVED"}])])       # путь B: стоп после списка групп
+    (ws / "collect_log.json").write_text(json.dumps({"calls": [], "no_spend": True, "preflight_spent": 0.0}),
+                                         encoding="utf-8")
+    assert _norm(ws) == 5

@@ -34,6 +34,7 @@ try:
                                   SEGMENT_RELATION_KEYS, banner_text, content_features, first_known, is_lal,
                                   is_live_group, layer_of, observed_keys, parse_dt, targeting_features,
                                   url_strings, users_list_ids)
+    from scripts.collect import total_spend
     from scripts.raw_store import items_of, mark_recovered, read_calls
 except ImportError:  # запуск напрямую
     from _console import setup_console
@@ -43,6 +44,7 @@ except ImportError:  # запуск напрямую
                           SEGMENT_RELATION_KEYS, banner_text, content_features, first_known, is_lal,
                           is_live_group, layer_of, observed_keys, parse_dt, targeting_features,
                           url_strings, users_list_ids)
+    from collect import total_spend
     from raw_store import items_of, mark_recovered, read_calls
 
 CONVERSION_SOURCE = {"leadads": "vk.result", "socialengagement": "vk.result"}
@@ -290,13 +292,6 @@ def _lifetime_fits(g: dict, d_from: date, period_stats: dict, summary_stats: dic
     return abs(total - shows) <= max(10, 0.01 * shows)
 
 
-def _num(v):
-    try:
-        return None if v is None or isinstance(v, bool) else float(str(v).replace(" ", "").replace(",", "."))
-    except ValueError:
-        return None
-
-
 def _account_spent(raw_dir: Path, period: tuple, collect_log):
     """Расход всего кабинета за период (предполётка): путь A — ответ statistics_day(entity=users) в raw/,
     путь B — preflight_spent в collect_log.json. None — не проверялся или не прочитан: это не «0 ₽»."""
@@ -307,16 +302,11 @@ def _account_spent(raw_dir: Path, period: tuple, collect_log):
             args = c["arguments"]
             if (args.get("date_from"), args.get("date_to")) != period:
                 return None   # предполётка за другой период — расход кабинета неизвестен
-            for it in _response_items(c):
-                total = it.get("total") if isinstance(it, dict) else None
-                v = _num(((total or {}).get("base") or {}).get("spent")) if isinstance(total, dict) else None
-                if v is None:
-                    rows = [_num(((r or {}).get("base") or {}).get("spent")) for r in it.get("rows") or []]
-                    v = sum(rows) if rows and None not in rows else None
-                if v is None:
-                    return None
-                got.append(v)
-        return round(sum(got), 2) if got else None
+            v = total_spend(c["response"])   # та же логика, что у предполётки пути B
+            if v is None:
+                return None
+            got.append(v)
+        return round(sum(got), 2)
     v = (collect_log or {}).get("preflight_spent")
     return None if v is None or isinstance(v, bool) else round(float(v), 2)
 
@@ -524,6 +514,7 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
                      "summary": bool(summary_calls), "stats": has_stats,
                      "users_lists": lists_collected, "users_lists_no_access": lists_no_access,
                      "pixels": bool(read_calls(raw_dir, "vk_ads_remarketing_pixels_list")),
+                     "preflight_no_spend": bool((collect_log or {}).get("no_spend")),
                      "metrika": False},
     }
 
@@ -533,12 +524,39 @@ def spend_state(ds: dict) -> str:
     no_stats — живых групп нет, а статистика по архивным не получена: «расхода нет» сказать нельзя;
     zero_spend — живые группы есть, их расход за период известен и равен 0; ok — остальное."""
     if not any(_is_live(g) for g in ds["groups"]):
+        if ds["coverage"].get("preflight_no_spend"):   # сбор сам остановился: 0 ₽ и живых групп нет
+            return "idle"
         measured = [g for g in ds["groups"] if g["status"] != "deleted"]
         if measured and (not ds["coverage"].get("stats") or any(g.get("stats_missing") for g in measured)):
             return "no_stats"
         if ds["totals"]["spent"] == 0:
             return "idle"
     return "zero_spend" if ds.get("zero_spend") else "ok"
+
+
+def _fmt_rub(v) -> str:
+    return f"{v:,.0f} ₽".replace(",", " ")
+
+
+def zero_spend_head(ds: dict, short: bool = False) -> str:
+    """Что сказать про нулевой расход живых групп: про весь кабинет — только если предполётка подтвердила 0 ₽;
+    «на удалённые группы» — только если удалённые есть и статистика остальных полная. short — для быстрого анализа."""
+    acc = ds.get("account_spent")
+    if acc is None:
+        return "Живые группы за период не откручивали (0 ₽)" if short else \
+            "Расход живых групп за период 0 ₽ (расход всего кабинета не проверялся)"
+    if acc == 0:
+        return "Кабинет за период не откручивал (0 ₽)" if short else \
+            "Расход кабинета за период 0 ₽: группы есть, но не откручивали"
+    rest = [g for g in ds["groups"] if g["status"] != "deleted"]
+    archived = round(sum(g["stats"]["spent"] for g in rest), 2)   # живые — 0
+    diff = round(max(acc - archived, 0.0), 2)
+    has_deleted = any(g["status"] == "deleted" for g in ds["groups"])
+    if diff and (not has_deleted or any(g.get("stats_missing") for g in rest)):
+        return f"Расход кабинета за период {_fmt_rub(acc)}, у живых групп 0 ₽ — разложить разницу по группам не удалось"
+    parts = ([f"{_fmt_rub(diff)} пришлось на удалённые группы"] if diff else []) + \
+        ([f"{_fmt_rub(archived)} — на архивные группы"] if archived else [])
+    return "Живые группы за период не откручивали" + ("; " + "; ".join(parts) if parts else "")
 
 
 def _check_stats(entity: str, s, out: list):
