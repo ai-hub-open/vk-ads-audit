@@ -212,9 +212,14 @@ def test_extended_fields_requested_first_single_call(tmp_path):
     log = collect(client, tmp_path / "raw", "2026-09-01", "2026-09-30")
     assert log["errors"] == 0
     g = tools(client, "vk_ads_campaigns_list")
-    assert len(g) == 1 and "auto_utm" in g[0]["fields"] and g[0]["fields"] != GROUP_FIELDS_BASE
+    assert len(g) == 1 and "enable_utm" in g[0]["fields"] and g[0]["fields"] != GROUP_FIELDS_BASE
+    assert "auto_utm" not in g[0]["fields"].split(",")        # живой прогон: 400 unknown_resource_fields
+    assert "utm" in g[0]["fields"].split(",")
     b = tools(client, "vk_ads_banners_list")
     assert len(b) == 2 and all("call_to_action" in a["fields"] for a in b)
+    for a in b:                                                # живой прогон: erid / ord_token / ord_erid → 400
+        names = a["fields"].split(",")
+        assert "ord_marker" in names and not {"erid", "ord_token", "ord_erid"} & set(names)
 
 
 def test_extended_fields_rejected_retries_with_base(tmp_path):

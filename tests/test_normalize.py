@@ -383,7 +383,7 @@ def test_v1_fields(tmp_path):
               {"id": 2, "name": "G2", "status": "active", "objective": "site_conversions", "ad_plan_id": 7,
                "targetings": {"geo": {"regions": [1]}}}]
     cabinet(raw, groups, banners_by_group={1: [{"id": 11, "status": "active", "created": "2026-09-20 10:00:00",
-                                                "call_to_action": "sign_up", "erid": "Kra23",
+                                                "call_to_action": "sign_up", "ord_marker": "Kra23",
                                                 "textblocks": {"text_90": {"text": "Запишитесь"}},
                                                 "urls": {"primary": {"id": 3, "url": "https://s.ru/?utm_source=vk"}},
                                                 "content": {"image_1080x1080": {"id": 50}}}]},

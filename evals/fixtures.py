@@ -74,7 +74,7 @@ def _good_banners(gid, prefix):
              {"image_1080x1350": {"id": gid * 1000 + 2}, "image_1920x1080": {"id": gid * 1000 + 3}},
              {"video_portrait_9_16_15s": {"id": gid * 1000 + 4}}]
     return [{"id": gid * 100 + i, "name": f"{prefix}_креатив{i}_Мск", "status": "active", "moderation_status": "allowed",
-             "created": "2026-09-20 10:00:00", "call_to_action": "sign_up", "erid": f"2VtzqxABCD{gid * 100 + i}",
+             "created": "2026-09-20 10:00:00", "call_to_action": "sign_up", "ord_marker": f"2VtzqxABCD{gid * 100 + i}",
              "textblocks": {"text_90": {"text": "Запишитесь на бесплатную консультацию"}},
              "urls": {"primary": {"id": 7, "url": "https://site.ru/?utm_source=vk_ads&utm_campaign={{campaign_id}}"}},
              "content": roles[i]} for i in range(3)]
@@ -179,7 +179,7 @@ def expert_1(raw: Path) -> dict:
     for g in groups:
         g["enable_utm"] = False                                           # авто-UTM выключена, в ссылках меток нет
     old = "2026-08-01 10:00:00"
-    common = {"status": "active", "created": old, "call_to_action": "learn_more", "erid": "",
+    common = {"status": "active", "created": old, "call_to_action": "learn_more", "ord_marker": "",
               "textblocks": {"text_90": {"text": "Лучшие велосипеды города"}},
               "urls": {"primary": {"id": 1, "url": "https://bike.ru/catalog"}}}
     bs = {1: [{"id": 101, "name": "Объявление 1", "moderation_status": "allowed", **common,
