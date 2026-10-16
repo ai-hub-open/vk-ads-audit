@@ -680,10 +680,12 @@ def stale_list(ds, th, ctx):
             title = "База давно не обновлялась"
             if referenced is None:
                 title += " (если база используется в таргетинге)"
-            out.append(finding("stale_list", "white", "list", lst, title,
-                               {"days_since_update": (end - d).days},
-                               "Обновить базу или перейти на динамический ретаргетинг",
-                               conf="high" if referenced is not None else "low"))
+            f = finding("stale_list", "white", "list", lst, title, {"days_since_update": (end - d).days},
+                        "Обновить базу или перейти на динамический ретаргетинг",
+                        conf="high" if referenced is not None else "low")
+            if referenced is None:   # условная карточка: используется ли база, не известно — ❌ в C14 не ставит
+                f["tentative"] = True
+            out.append(f)
     return out
 
 

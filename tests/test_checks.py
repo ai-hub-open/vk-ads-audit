@@ -191,5 +191,7 @@ def test_partial_banner_coverage_gates_banner_checks():
                   make_banner(12, 1, content_ids=[2], has_video=True, text="Купите", cta="buy", age_days=3, erid="x")])
     ds["coverage"]["banner_groups"] = [1]
     cl = checklist(ds)
-    for cid in ("E1", "E2", "E3", "E4", "E5", "E6", "E7"):
+    for cid in ("E2", "E3", "E4", "E5", "E6", "E7"):
         assert status(cl, cid) == "unknown", cid
+    # третий живой прогон: сработавшая находка (у группы 1 нет 4:5, 16:9, 9:16) гейтом не прячется
+    assert status(cl, "E1") == "fail"
