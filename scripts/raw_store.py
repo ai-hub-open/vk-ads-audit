@@ -82,6 +82,11 @@ def _load(path: Path, tool: str) -> dict:
         raise ValueError(f"{path.name}: arguments должен быть объектом, а не {type(data['arguments']).__name__}")
     if data["tool"] != tool:
         raise ValueError(f"{path.name}: tool в файле {data['tool']!r}, а ожидался {tool!r}")
+    resp = data["response"]
+    if isinstance(resp, dict) and (resp.get("isError") is True or resp.get("error") is True):
+        # те же признаки, что у import: такой файл — не удачный вызов и не данные кабинета
+        raise ValueError(f"{path.name}: в response ответ-ошибка инструмента, а не данные кабинета — удали файл "
+                         "и запиши сбой в collect_log.json (или повтори вызов)")
     return data
 
 

@@ -1,7 +1,8 @@
 """
 collect.py — путь B: скрипт сам собирает кабинет из MCP VK Рекламы в raw/.
 
-Предполётка (один вызов): расход пользователя за период по дням; нулевой расход — сбор не начинается.
+Предполётка (один вызов): расход пользователя за период по дням — в collect_log.json (preflight_spent). Нулевой
+расход и нет живых групп — сбор останавливается; живые группы есть — сбор идёт, отчёт выйдет с плашкой «0 ₽».
 Опись (кампании, группы, объявления по группам, сегменты, списки, пиксели) и
 статистика (по дням по группам и по объявлениям; сводка по группам — за всё время, без дат, только ради
 охвата и частоты).
@@ -13,7 +14,7 @@ collect.py — путь B: скрипт сам собирает кабинет �
   2 — путь B недоступен (нет ссылки или --probe провалился), неверные аргументы или период;
   3 — критический сбой: не собрана опись кампаний (collect_log.json: critical);
   4 — raw/ уже содержит файлы: нужна новая рабочая папка или очистка raw/;
-  5 — за период в кабинете нет расхода: сбор не запускался, предложи другой период или кабинет.
+  5 — за период в кабинете нет расхода и нет живых групп: собран только список групп, предложи другой кабинет.
   (2 также — период старше доступной истории статистики, ~366 дней.)
 
     python -m scripts.collect --probe [--account-id ID]
@@ -240,17 +241,16 @@ def collect(client, raw_dir: Path, date_from: str, date_to: str, mode: str = "de
                                "Укажи новую рабочую папку или удали содержимое raw/.")
     c = _Collector(client, raw_dir, secrets)
     log = {"mode": mode, "date_from": date_from, "date_to": date_to, "calls": c.log,
-           "errors": 0, "critical": False, "no_spend": False}
+           "errors": 0, "critical": False, "no_spend": False, "preflight_spent": None}
     out = raw_dir.parent / "collect_log.json"
     try:
         period = {"date_from": date_from, "date_to": date_to, "metrics": METRICS_DAY}
         uid = _user_id(c.probe("vk_ads_account_info", {}))
-        if uid is not None:   # предполётка: нулевой расход за период — собирать нечего
+        spent = None
+        if uid is not None:   # предполётка: расход кабинета за период — в журнал, по нему плашка отчёта
             resp = c.probe("vk_ads_statistics_day", {"entity": "users", "ids": str(uid), **period})
             spent = total_spend(resp) if resp is not None else None
-            if spent == 0:
-                log["no_spend"] = True
-                return log
+            log["preflight_spent"] = spent
             if spent is None:
                 log["preflight"] = "пропущена: расход за период прочитать не удалось"
         else:
@@ -262,6 +262,9 @@ def collect(client, raw_dir: Path, date_from: str, date_to: str, mode: str = "de
             groups = []
         measured = [g["id"] for g in groups if g.get("status") != "deleted"]          # расход архивных — в итогах
         live = [g["id"] for g in groups if g.get("status") != "deleted" and not _archived(g)]
+        if spent == 0 and not live and not log["critical"]:   # 0 ₽ и живых групп нет — собирать нечего
+            log["no_spend"] = True
+            return log
 
         banner_ids: list = []
         banner_fields = BANNER_FIELDS
@@ -346,12 +349,12 @@ def main(argv=None) -> int:
         print(f"✗ {e} Более ранний период через MCP не собрать.")
         return 2
     if log.get("no_spend") and args.mode == "quick":
-        print(f"✗ За период {args.date_from} — {date_to} кабинет не откручивал (расход 0 ₽): быстрый анализ строить "
-              "не на чем. Выберите другой день или другой кабинет (--account-id).")
+        print(f"✗ За период {args.date_from} — {date_to} кабинет не откручивал (расход 0 ₽, живых групп нет): быстрый "
+              "анализ строить не на чем. Выберите другой кабинет (--account-id).")
         return 5
     if log.get("no_spend"):
-        print(f"✗ За период {args.date_from} — {date_to} расход в кабинете 0 ₽: собирать нечего. "
-              "Выберите другой период или другой кабинет (--account-id).")
+        print(f"✗ За период {args.date_from} — {date_to} расход в кабинете 0 ₽ и живых групп нет (все удалены или "
+              "в архиве): собирать нечего. Выберите другой кабинет (--account-id) или другой период.")
         return 5
     print(f"вызовов: {len(log['calls'])}, с ошибками: {log['errors']} → {ws / 'collect_log.json'}")
     if log["critical"]:

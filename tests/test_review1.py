@@ -292,7 +292,8 @@ def test_e7_unknown_reason_wording():
 
 def test_quick_zero_spend_wording(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("VK_ADS_CONNECTION_URL", URL)
-    monkeypatch.setattr(collect_mod, "McpClient", lambda url, **kw: SpendClient(groups(1), spent="0"))
+    # живых групп нет — иначе сбор идёт дальше (ревью fix/live-run-2)
+    monkeypatch.setattr(collect_mod, "McpClient", lambda url, **kw: SpendClient(groups(1, deleted={1}), spent="0"))
     rc = collect_mod.main(["--workspace", str(tmp_path / "ws"), "--mode", "quick", "--date-from", "2026-09-01",
                            "--date-to", "2026-09-30"])
     assert rc == 5 and "кабинет не откручивал" in capsys.readouterr().out

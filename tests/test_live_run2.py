@@ -311,9 +311,11 @@ def test_or_status_shown_in_report_as_reference():
           make_banner(13, 1, erid="C", ord_status="pending")]
     ds = make_ds([make_group(1)], bs)
     html = render(ds, {**res(ds), "checklist": checklist(ds)})
-    assert "Справочно" in html and "or_status" in html and "registered — 2" in html and "pending — 1" in html
+    # ревью: имя поля API клиенту не показываем — подпись по-русски
+    assert "Статус в ОРД (справочно, значения VK как есть)" in html and "or_status" not in html
+    assert "registered — 2" in html and "pending — 1" in html
     plain = make_ds([make_group(1)], [make_banner(11, 1, erid="A")])
-    assert "or_status" not in render(plain, {**res(plain), "checklist": checklist(plain)})
+    assert "Статус в ОРД" not in render(plain, {**res(plain), "checklist": checklist(plain)})
 
 
 def test_or_status_documented():
@@ -504,7 +506,8 @@ def test_zero_spend_with_live_groups_builds_report_with_banner(tmp_path):
     ds = json.loads((ws / "dataset.json").read_text(encoding="utf-8"))
     assert ds["zero_spend"] is True
     html = render(ds, {**res(ds), "checklist": checklist(ds)})
-    assert "Расход за период 0 ₽" in html and html.index("Расход за период 0 ₽") < html.index("Чек-лист")
+    # предполётки нет (расход кабинета неизвестен) — утверждаем только про живые группы
+    assert "Расход живых групп за период 0 ₽" in html and html.index("Расход живых групп") < html.index("Чек-лист")
 
 
 def test_zero_spend_flag_only_when_spend_is_known(tmp_path):
@@ -521,4 +524,203 @@ def test_zero_spend_flag_only_when_spend_is_known(tmp_path):
 
 
 def test_skill_explains_zero_spend_stop():
-    assert "нет живых групп" in SKILL and "кодом 5" in SKILL and "Расход за период 0 ₽" in SKILL
+    assert "нет живых групп" in SKILL and "кодом 5" in SKILL and "плашкой" in SKILL
+
+
+# ======== независимое ревью fix/live-run-2 ========
+
+def _zero_group(i=1, **kw):
+    daily = [{"date": f"2026-09-{d:02d}", **stats()} for d in range(1, 31)]
+    kw.setdefault("created", "2026-08-01 00:00:00")
+    return make_group(i, stats=stats(), daily=daily, **kw)
+
+
+# ---- R1. F6 при нулевом расходе — «нет расхода за период», не ✅ ----
+
+def test_f6_na_when_no_spend():
+    ds = make_ds([_zero_group(1), _zero_group(2)], zero_spend=True)
+    c = row(checklist(ds), "F6")
+    assert (c["status"], c["reason"]) == ("na", "нет расхода за период")
+    assert row(checklist(make_ds([_zero_group(1)])), "F6")["status"] == "na"     # без флага — по сумме расхода
+
+
+# ---- R2. предполётка: 0 ₽ — стоп только без живых групп; расход — в журнал; точная плашка ----
+
+def test_preflight_zero_spend_with_live_groups_keeps_collecting(tmp_path):
+    client = SpendClient(groups(2), spent="0")
+    log = collect(client, tmp_path / "raw", "2026-09-01", "2026-09-30")
+    assert log["no_spend"] is False and log["preflight_spent"] == 0.0
+    assert [a for a in tools(client, "vk_ads_statistics_day") if a["entity"] == "campaigns"]
+
+
+def test_preflight_zero_spend_without_live_groups_stops(tmp_path):
+    gs = [{"id": 1, "status": "deleted"}, {"id": 2, "status": "active", "issues": [{"code": "ARCHIVED"}]}]
+    client = SpendClient(gs, spent="0")
+    log = collect(client, tmp_path / "raw", "2026-09-01", "2026-09-30")
+    assert log["no_spend"] is True
+    assert not [a for a in tools(client, "vk_ads_statistics_day") if a["entity"] != "users"]
+    assert not tools(client, "vk_ads_banners_list")
+
+
+def test_preflight_spent_recorded_in_log(tmp_path):
+    assert collect(SpendClient(groups(1)), tmp_path / "a", "2026-09-01", "2026-09-30")["preflight_spent"] == 1500.0
+    assert collect(FakeClient(groups(1)), tmp_path / "b", "2026-09-01", "2026-09-30")["preflight_spent"] is None
+
+
+def test_account_spent_from_log_or_raw_users_call(tmp_path):
+    from scripts.raw_store import write_call
+    raw = tmp_path / "raw"
+    cabinet(raw, [_active(1)], daily={1: day_rows(2)})
+    assert build_dataset(raw, *D)["account_spent"] is None
+    assert build_dataset(raw, *D, collect_log={"calls": [], "preflight_spent": 900.0})["account_spent"] == 900.0
+    raw2 = tmp_path / "raw2"                                                       # путь A: предполётка файлом в raw/
+    cabinet(raw2, [_active(1)], daily={1: day_rows(2)})
+    write_call(raw2, "vk_ads_statistics_day", {"entity": "users", "ids": "77", "date_from": D[0], "date_to": D[1],
+                                                "metrics": "base"},
+               {"items": [{"id": 77, "total": {"base": {"spent": "1500"}}}]})
+    ds = build_dataset(raw2, *D)
+    assert ds["account_spent"] == 1500.0 and ds["totals"]["spent"] == 200.0     # в итоги групп не попадает
+
+
+def _zero_ds(account_spent, archived_spent=0):
+    gs = [_zero_group(1)]
+    if archived_spent:
+        gs.append(make_group(2, issues=["ARCHIVED"], stats=stats(archived_spent, 1000, 10, 0)))
+    return make_ds(gs, zero_spend=True, account_spent=account_spent,
+                   totals=stats(archived_spent, 1000 if archived_spent else 0, 0, 0))
+
+
+def test_zero_spend_banner_text_is_precise():
+    from scripts.render_report import zero_spend_text
+    assert zero_spend_text(_zero_ds(None)).startswith("Расход живых групп за период 0 ₽")
+    assert zero_spend_text(_zero_ds(0.0)).startswith("Расход кабинета за период 0 ₽")
+    t = zero_spend_text(_zero_ds(1500.0))
+    assert t.startswith("Живые группы за период не откручивали; 1 500 ₽ пришлось на удалённые группы")
+    t2 = zero_spend_text(_zero_ds(1500.0, archived_spent=300))
+    assert "1 200 ₽ пришлось на удалённые группы" in t2 and "300 ₽ — на архивные группы" in t2
+
+
+def test_zero_spend_flag_counts_live_groups_only(tmp_path):
+    raw = tmp_path / "raw"
+    cabinet(raw, [_active(1), _active(2, issues=[{"code": "ARCHIVED"}])],
+            daily={1: day_rows(2, spent="0", shows=0, clicks=0, goals=0), 2: day_rows(2)})
+    assert build_dataset(raw, *D)["zero_spend"] is True                 # живая группа не откручивала, архивная — да
+
+
+# ---- R3. ответ-ошибка в raw/ — не удачный повтор ----
+
+ERROR_RESPONSES = [{"content": [{"type": "text", "text": "Ошибка: HTTP 502"}], "isError": True},
+                   {"error": True, "status": 500, "detail": "x"}]
+
+
+def test_error_response_in_raw_is_not_recovery_and_fails_check(tmp_path):
+    import pytest
+    from scripts.raw_store import main as raw_main, mark_recovered, write_call
+    for i, resp in enumerate(ERROR_RESPONSES):
+        ws = tmp_path / f"ws{i}"
+        write_call(ws / "raw", "vk_ads_remarketing_pixels_list", {}, resp)
+        log = {"calls": [_fail("vk_ads_remarketing_pixels_list", {})]}
+        assert not mark_recovered(log, ws / "raw")["calls"][0].get("recovered")
+        assert raw_main(["check", "--workspace", str(ws)]) == 3
+        with pytest.raises(ValueError, match="ошибк"):
+            build_dataset(ws / "raw", *D)
+
+
+def test_skill_says_no_error_responses_in_raw():
+    assert "ответ-ошибку в `raw/` не клади" in SKILL
+
+
+# ---- R4. F3: подходящие группы — по _measured (и паузные); подходящих нет — «нечего проверять» ----
+
+def _f3_group(i, freq, **kw):
+    return make_group(i, stats=stats(900, 20000, 100, 1, frequency=freq), created="2026-08-01 00:00:00",
+                      daily=[{"date": f"2026-09-{d:02d}", **stats(30, 700, 3, 0)} for d in range(1, 31)], **kw)
+
+
+def test_f3_paused_only_groups_with_known_frequency_pass():
+    ds = make_ds([_f3_group(1, 1.5, status="blocked"), _f3_group(2, 1.2, status="blocked")])
+    assert row(checklist(ds), "F3")["status"] == "pass"
+
+
+def test_f3_na_when_no_spend():
+    c = row(checklist(make_ds([_zero_group(1)], zero_spend=True)), "F3")
+    assert (c["status"], c["reason"]) == ("na", "нечего проверять: нет групп с достаточными показами")
+
+
+# ---- R5. Senler: «объявления не собирались» ≠ «активных объявлений нет» ----
+
+def test_senler_na_when_no_active_banners_but_unknown_when_not_collected():
+    collected = make_ds([make_group(1)], [make_banner(11, 1, status="blocked", urls=["https://site.ru/"])])
+    c = row(checklist(collected), "B1.senler")
+    assert (c["status"], c["reason"]) == ("na", "нечего проверять: нет активных объявлений")
+    not_collected = make_ds([make_group(1)], coverage={"path": "A", "banners": False, "summary": False,
+                                                      "stats": True, "pixels": True, "metrika": False})
+    c2 = row(checklist(not_collected), "B1.senler")
+    assert (c2["status"], c2["reason"]) == ("unknown", "объявления не собирались")
+
+
+# ---- R6. F5 и падежи ----
+
+def test_f5_no_shows_and_plural():
+    assert row(checklist(make_ds([_zero_group(1)], zero_spend=True)), "F5")["reason"] == "нет показов за период"
+    young = make_group(1, created="2026-09-27 00:00:00", stats=stats(300, 3000, 30, 1),
+                       daily=[{"date": f"2026-09-{d}", **stats(100, 1000, 10, 0)} for d in (28, 29, 30)])
+    assert row(checklist(make_ds([young])), "F5")["reason"] == "рано судить: моложе 7 дней — 1 группа"
+
+
+def test_notes_use_russian_plural(tmp_path):
+    raw = tmp_path / "raw"
+    cabinet(raw, [_active(1), _active(2)], banners_by_group={1: [{"id": 11, "status": "active"}]})
+    assert "Объявления не собраны для 1 группы — по ним выводы на уровне группы." in build_dataset(raw, *D)["notes"]
+
+
+# ---- R7. авто-UTM: строка только по активным группам ----
+
+def test_utm_unconfirmed_line_only_for_active_groups(tmp_path):
+    from scripts.render_report import limitations
+    raw = tmp_path / "raw"
+    cabinet(raw, [_active(1, status="blocked")], daily={1: day_rows(2)},
+            banners_by_group={1: [{"id": 11, "status": "active", "urls": SITE}]})
+    ds = build_dataset(raw, *D)
+    cl = checklist(ds)
+    assert row(cl, "A3")["status"] == "na"
+    assert not any("Авто-UTM" in x for x in limitations(ds, None, cl))
+
+
+# ---- R8. архивная группа и упавшая статистика — не «расхода нет» ----
+
+def test_archived_only_with_failed_stats_says_stats_missing(tmp_path, capsys):
+    import json
+    ws = tmp_path / "ws"
+    cabinet(ws / "raw", [_active(1, issues=[{"code": "ARCHIVED"}])])
+    (ws / "collect_log.json").write_text(json.dumps({"calls": [_fail("vk_ads_statistics_day", {"entity": "campaigns"})]}),
+                                         encoding="utf-8")
+    assert _norm(ws) == 3
+    out = capsys.readouterr().out
+    assert "статистика не получена" in out and "расхода" not in out
+    assert not (ws / "dataset.json").exists()
+
+
+# ---- R9. нет живых групп, но архивные тратили — не «кабинет не откручивает» ----
+
+def test_idle_wording_when_archived_groups_spent():
+    ds = make_ds([make_group(1, issues=["ARCHIVED"], stats=stats(500, 1000, 10, 0))], totals=stats(500, 1000, 10, 0))
+    cl = checklist(ds)
+    assert cl["total"] is None and cl["idle"] == "нет живых групп — общий балл не считается"
+
+
+# ---- R10. B3: только паузные группы, слои неизвестны — «нет данных» ----
+
+def test_b3_unknown_for_paused_groups_with_unknown_layers():
+    ds = make_ds([make_group(1, status="blocked", layer=None, stats=stats(500, 1000, 10, 0))])
+    assert row(checklist(ds), "B3")["status"] == "unknown"
+
+
+# ---- R11. мелочи ----
+
+def test_changelog_and_source_cleanups():
+    import re
+    log = (SKILL_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert "игнорирует период" not in log and "только за всё время, даты не передавать" in log
+    src = (SKILL_ROOT / "scripts" / "render_report.py").read_text(encoding="utf-8")
+    assert not [ln for ln in src.splitlines() if re.search(r"\S {8,}\S", ln)]

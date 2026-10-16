@@ -312,14 +312,17 @@ class SpendClient(FakeClient):
 
 
 def test_preflight_zero_spend_stops_before_collecting(tmp_path):
-    client = SpendClient(groups(3), spent="0")
+    # Ревью fix/live-run-2: 0 ₽ останавливает сбор, только если живых групп нет (их видно из списка групп);
+    # с живыми группами сбор идёт дальше — отчёт выйдет с плашкой «0 ₽» (test_live_run2).
+    client = SpendClient(groups(3, deleted={1, 2, 3}), spent="0")
     log = collect(client, tmp_path / "raw", "2026-09-01", "2026-09-30")
-    assert log["no_spend"] is True
-    assert [t for t, _ in client.calls] == ["vk_ads_account_info", "vk_ads_statistics_day"]
+    assert log["no_spend"] is True and log["preflight_spent"] == 0.0
+    assert [t for t, _ in client.calls] == ["vk_ads_account_info", "vk_ads_statistics_day", "vk_ads_ad_plans_list",
+                                            "vk_ads_campaigns_list"]
     users = tools(client, "vk_ads_statistics_day")[0]
     assert users["entity"] == "users" and users["ids"] == "77"
     assert users["date_from"] == "2026-09-01" and users["date_to"] == "2026-09-30"
-    assert not (tmp_path / "raw").exists() or not any((tmp_path / "raw").iterdir())
+    assert not list((tmp_path / "raw").glob("vk_ads_statistics_*"))
     assert (tmp_path / "collect_log.json").is_file()
 
 
@@ -363,11 +366,12 @@ def test_total_spend_shapes():
 
 def test_cli_zero_spend_exit_5(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("VK_ADS_CONNECTION_URL", URL)
-    monkeypatch.setattr(collect_mod, "McpClient", lambda url, **kw: SpendClient(groups(1), spent="0"))
+    # живых групп нет — иначе сбор идёт дальше (ревью fix/live-run-2)
+    monkeypatch.setattr(collect_mod, "McpClient", lambda url, **kw: SpendClient(groups(1, deleted={1}), spent="0"))
     rc = collect_mod.main(["--workspace", str(tmp_path / "ws"), "--date-from", "2026-09-01",
                            "--date-to", "2026-09-30"])
     out = capsys.readouterr().out
-    assert rc == 5 and "расход в кабинете 0" in out and "другой период" in out
+    assert rc == 5 and "расход в кабинете 0" in out and "живых групп нет" in out and "другой период" in out
 
 
 def test_period_older_than_history_refused_before_any_call(tmp_path):

@@ -49,8 +49,21 @@ td,th{border-bottom:1px solid #eee;padding:4px 6px;text-align:left}th{background
 margin:16px 0;font-size:17px;font-weight:600}.score{font-weight:600}.st-pass{color:#1a7f37}.st-fail{color:#c62828}.st-unk{color:#888}.st-pot{color:#1a7f37}
 @media print{body{margin:0}.f{break-inside:avoid}}
 """
-ZERO_SPEND_HTML = ("<div class='alert'>Расход за период 0 ₽: группы есть, но за период не откручивали — выводов по "
-                   "расходу и результату нет, проверены только настройки кабинета.</div>")
+ZERO_SPEND_TAIL = " — выводов по расходу и результату нет, проверены только настройки кабинета."
+
+
+def zero_spend_text(ds: dict) -> str:
+    """Плашка «0 ₽»: про весь кабинет говорим, только если предполётка подтвердила 0 ₽; иначе — про живые группы."""
+    acc = ds.get("account_spent")
+    if acc is None:
+        return "Расход живых групп за период 0 ₽ (расход всего кабинета не проверялся)" + ZERO_SPEND_TAIL
+    if acc == 0:
+        return "Расход кабинета за период 0 ₽: группы есть, но не откручивали" + ZERO_SPEND_TAIL
+    archived = round(sum(g["stats"]["spent"] for g in ds["groups"] if g["status"] != "deleted"), 2)  # живые — 0
+    deleted = round(max(acc - archived, 0.0), 2)
+    parts = ([f"{fmt_rub(deleted)} пришлось на удалённые группы"] if deleted else []) + \
+        ([f"{fmt_rub(archived)} — на архивные группы"] if archived else [])
+    return "Живые группы за период не откручивали" + ("; " + "; ".join(parts) if parts else "") + ZERO_SPEND_TAIL
 STATUS_ICON = {"pass": "✅", "fail": "❌", "unknown": "—", "na": "—", "ask": "❓", "potential": "🟢"}
 STATUS_CLASS = {"pass": "pass", "fail": "fail", "unknown": "unk", "na": "unk", "ask": "unk", "potential": "pot"}
 
@@ -84,7 +97,7 @@ def limitations(ds: dict, collect_log=None, checklist=None, th=None) -> list:
     lines = list(ALWAYS_LIMITATIONS)
     cov = ds["coverage"]
     lines.extend(ds.get("notes") or [])
-    any_live = any(is_live_group(g) for g in ds["groups"])          # все группы удалены — собирать было нечего
+    any_live = any(is_live_group(g) for g in ds["groups"])  # все группы удалены — собирать было нечего
     measured = any(g["status"] != "deleted" for g in ds["groups"])  # статистику берём и у архивных
     if cov["path"] == "A" and any_live:
         lines.append("Данные собраны через модель (путь A): объявления разобраны только у групп "
@@ -99,7 +112,8 @@ def limitations(ds: dict, collect_log=None, checklist=None, th=None) -> list:
     collect_log = mark_recovered(collect_log)   # повтор того же вызова прошёл — сбой не ограничение
     calls = (collect_log or {}).get("calls", [])
     for c in calls:
-        if not c.get("ok") and not c.get("superseded") and not c.get("recovered") and not c.get("preflight")                 and not _lists_no_access(c):
+        skip = c.get("superseded") or c.get("recovered") or c.get("preflight") or _lists_no_access(c)
+        if not c.get("ok") and not skip:
             lines.append(f"Не удалось получить {c['tool']}: {c.get('error')}")
     if any(_lists_no_access(c) and not c.get("recovered") for c in calls) and not any(
             "Нет доступа к базам клиентов" in n for n in ds.get("notes") or []):
@@ -172,8 +186,8 @@ def _ord_status_html(ds, th) -> str:
     if not counts:
         return ""
     parts = " · ".join(f"{escape(k)} — {v}" for k, v in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
-    return ("<p class='muted'>Справочно: статус ОРД активных объявлений (поле VK or_status; значения не расшифрованы, "
-            f"на проверку A2 не влияют): {parts}</p>")
+    return ("<p class='muted'>Статус в ОРД (справочно, значения VK как есть) у активных объявлений — на проверку "
+            f"маркировки A2 не влияет: {parts}</p>")
 
 
 def _questions_html(qs) -> str:
@@ -198,7 +212,7 @@ def render(ds: dict, findings: dict, collect_log=None, title: str = "", th=None)
              f"<h1>Аудит VK Рекламы {escape(title)}</h1>",
              f"<p class='muted'>Период {ds['period']['from']} — {ds['period']['to']} · путь {ds['coverage']['path']}"
              f" · опорный CPA: {fmt_rub(ref)} ({ref_note})</p>",
-             ZERO_SPEND_HTML if ds.get("zero_spend") else "",
+             f"<div class='alert'>{escape(zero_spend_text(ds))}</div>" if ds.get("zero_spend") else "",
              "<div class='tiles'>" + "".join(f"<div class='tile'>{k}<b>{v}</b></div>" for k, v in tiles) + "</div>",
              _metrika_total_html(ds.get("metrika_total")),
              _checklist_html(findings.get("checklist")),

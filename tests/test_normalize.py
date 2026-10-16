@@ -261,7 +261,7 @@ def test_group_not_covered_anywhere_is_stats_missing(tmp_path):
     ds = build_dataset(raw, "2026-09-01", "2026-09-30")
     g2 = ds["groups"][1]
     assert g2["stats_missing"] is True and g2["stats"]["spent"] == 0.0
-    assert "Статистика не получена для 1 групп — итоги и выводы по ним неполные." in ds["notes"]
+    assert "Статистика не получена для 1 группы — итоги и выводы по ним неполные." in ds["notes"]   # падеж по числу
 
 
 def test_summary_all_time_does_not_block_audit(tmp_path):
