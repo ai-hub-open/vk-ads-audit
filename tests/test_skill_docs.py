@@ -139,7 +139,7 @@ def test_skill_documents_live_run_fixes():
     assert "Подтверждено 16.10.2026" in tools and "`ord_marker`" in tools and "`utm`" in tools
     assert "рубли" in tools and "уже проценты" in tools and "raw_store import" in tools
     for fragment in ("Частота и охват за период не определены", "Нет доступа к базам клиентов",
-                     "MCP не возвращает размер сегментов"):
+                     "VK не отдаёт через API размер сегментов"):
         assert fragment in lim, fragment
     assert "ARCHIVED" in rules and "video_landscape_180s" in rules
     assert "Исправления по первому живому прогону" in log
@@ -152,6 +152,6 @@ def test_report_limitation_lines_match_docs():
     lim = _ref("limitations.md")
     # «Нет доступа…» — без имени инструмента в тексте для клиента (третий живой прогон)
     for fragment in ("Частота и охват за период не определены для", "Нет доступа к базам клиентов: проверки",
-                     "MCP не возвращает размер сегментов и связи с базами клиентов"):
+                     "VK не отдаёт через API размер сегментов и связи с базами клиентов"):
         assert fragment in src and fragment.split(" (")[0].split(" для")[0] in lim, fragment
     assert re.search(r"def import_response", (SKILL_ROOT / "scripts" / "raw_store.py").read_text(encoding="utf-8"))

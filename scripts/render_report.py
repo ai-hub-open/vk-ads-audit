@@ -224,7 +224,7 @@ def limitations(ds: dict, collect_log=None, checklist=None, th=None) -> list:
     any_live = any(is_live_group(g) for g in ds["groups"])  # все группы удалены — собирать было нечего
     measured = any(g["status"] != "deleted" for g in ds["groups"])  # статистику берём и у архивных
     if cov["path"] == "A" and any_live:
-        lines.append("Данные собраны через модель (путь A): объявления разобраны только у групп "
+        lines.append("Данные собраны вручную через ассистента (путь A): объявления разобраны только у групп "
                      "с наибольшим расходом.")
     if not cov["banners"] and any_live:
         lines.append("Объявления не собирались — выводы на уровне групп.")

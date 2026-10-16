@@ -247,7 +247,7 @@ def test_retargeting_fails_when_only_keyword_segments():
 def test_retargeting_not_pass_when_warm_only_guessed():
     ds = make_ds([make_group(1, layer="warm", layer_guessed=True, segment_ids=[6]), make_group(2)])
     r = row(checklist(ds), "B1.retargeting")
-    assert r["status"] == "unknown" and "relations" in r["reason"]
+    assert r["status"] == "unknown" and "по догадке" in r["reason"]
     assert found(ds, "no_retargeting") == []
     ok = make_ds([make_group(1, layer="warm", layer_guessed=False, segment_ids=[1]), make_group(2)])
     assert row(checklist(ok), "B1.retargeting")["status"] == "pass"
@@ -260,14 +260,14 @@ def test_layer_share_with_guessed_layers_is_low_confidence_and_b3_unknown():
     f = found(ds, "layer_share")
     assert len(f) == 1 and f[0]["confidence"] == "low" and f[0]["tentative"] is True
     b3 = row(checklist(ds), "B3")
-    assert b3["status"] == "unknown" and "relations" in b3["reason"]
+    assert b3["status"] == "unknown" and "по догадке" in b3["reason"]
     sure = make_ds([make_group(1, layer="warm", segment_ids=[1], stats=stats(9000, 90000, 900, 90)), g2])
     assert row(checklist(sure), "B3")["status"] == "fail" and found(sure, "layer_share")[0]["confidence"] == "high"
 
 
 # ---- 2.2. Ключевые фразы через сегменты ----
 
-KW_SEG = "параметры фраз хранятся в сегменте, MCP их не отдаёт"
+KW_SEG = "параметры фраз хранятся в сегменте, VK не отдаёт их через API"
 
 
 def test_c6_pass_via_keyword_segments_and_c7_c9_unknown():
@@ -283,7 +283,7 @@ def test_keyword_segment_only_in_paused_group_does_not_count():
     g = make_group(1, status="blocked", segment_ids=[3], keyword_segment_ids=[3])
     cl = checklist(make_ds([g, make_group(2)]))
     assert row(cl, "C6")["status"] == "unknown"                  # поле фраз не получено — как раньше
-    assert row(cl, "C7")["status"] == "na"
+    assert row(cl, "C7")["status"] == "unknown"                  # ревью: C6 «нет данных» — и C7–C9 тоже
 
 
 def test_no_phrases_at_all_unchanged():
@@ -305,6 +305,7 @@ def test_direct_keywords_keep_their_checks_next_to_segments():
 PATH_A = {"path": "A", "banners": True, "banner_groups": [1], "summary": True, "stats": True, "pixels": True,
           "metrika": False}
 SAMPLE = "проверено 2 объявления в 1 группе из 3 активных, нарушений нет"
+SAMPLE_LIVE = "проверено 2 объявления в 1 группе из 3 живых, нарушений нет"   # A2, A3, E8, E9 судят все живые
 
 
 def _sample(**banner_kw):
@@ -315,8 +316,9 @@ def _sample(**banner_kw):
 
 def test_sample_gives_unknown_with_counts_for_a2_a3_e8_e9():
     cl = checklist(_sample())
-    for cid in ("A2", "A3", "E8", "E9", "E6"):
-        assert (row(cl, cid)["status"], row(cl, cid)["reason"]) == ("unknown", SAMPLE), cid
+    for cid in ("A2", "A3", "E8", "E9"):
+        assert (row(cl, cid)["status"], row(cl, cid)["reason"]) == ("unknown", SAMPLE_LIVE), cid
+    assert (row(cl, "E6")["status"], row(cl, "E6")["reason"]) == ("unknown", SAMPLE)
 
 
 def test_sample_violation_stays_fail():
@@ -686,6 +688,17 @@ def test_f5_rule_doc_lists_rules_under_seven_days():
         assert name in line, name
 
 
+# ---- R2. E8, E9 — покрытие по всем живым группам ----
+
+def test_e8_e9_sample_counts_all_live_groups():
+    paused = [make_group(1, status="blocked"), make_group(2, status="blocked")]
+    ds = make_ds(paused, [make_banner(11, 1, status="blocked")], coverage={**PATH_A, "banner_groups": [1]})
+    cl = checklist(ds)
+    for cid in ("E8", "E9"):
+        assert (row(cl, cid)["status"], row(cl, cid)["reason"]) == (
+            "unknown", "проверено 1 объявление в 1 группе из 2 живых, нарушений нет"), cid
+
+
 # ---- R3. Фолбэк на goals — шапка честно говорит, откуда конверсии ----
 
 def test_header_on_goals_fallback():
@@ -695,6 +708,28 @@ def test_header_on_goals_fallback():
     head = render(ds, {**res(ds), "checklist": checklist(ds)}).split("Чек-лист")[0]
     assert "Конверсии — все цели пикселя: «Результат» VK не пришёл, могут быть завышены" in head
     assert "результат по цели оптимизации" not in head and "справочно" not in head
+
+
+# ---- R6. C6 «нет данных» — C7–C9 тоже ----
+
+def test_c7_c9_unknown_when_c6_unknown():
+    g = make_group(1, segment_ids=[6], untyped_segment_ids=[6], layer="warm", layer_guessed=True,
+                   features={"has_keywords": False})
+    cl = checklist(make_ds([g]))
+    assert row(cl, "C6")["status"] == "unknown"
+    for cid in ("C7", "C8", "C9"):
+        assert row(cl, cid)["status"] == "unknown" and row(cl, cid)["reason"] == row(cl, "C6")["reason"], cid
+    cl = checklist(make_ds([make_group(1, features={"has_keywords": None})]))
+    assert row(cl, "C6")["status"] == "unknown" and row(cl, "C7")["status"] == "unknown"
+
+
+def test_normalize_marks_untyped_segments(tmp_path):
+    from scripts.raw_store import write_call
+    raw = tmp_path / "raw"
+    cabinet(raw, [_active(1, targetings={"geo": {"regions": [1]}, "segments": [6, 3]})])
+    write_call(raw, "vk_ads_remarketing_segments_list", {"paginated": True},
+               {"items": [_seg(6), _seg(3, "remarketing_search_phrases")]})
+    assert build_dataset(raw, *D)["groups"][0]["untyped_segment_ids"] == [6]
 
 
 # ---- R7. Опорный CPA и F6 — внутри одной цели ----
@@ -720,6 +755,31 @@ def test_conversions_tile_says_sum_of_different_results():
     assert "конверсии на сайте — 2" in html and "лид-формы — 3" in html
     single = make_ds([make_group(1, stats=stats(100, 1000, 10, 2))])
     assert "сумма результатов разных целей" not in render(single, {**res(single), "checklist": checklist(single)})
+
+
+# ---- R9. E2, E5 — «есть ли вообще»: найдено в выборке — ✅ ----
+
+def test_e2_e5_pass_when_found_in_sample():
+    bs = [make_banner(11, 1, content_ids=[1], ratios=["1:1"]),
+          make_banner(12, 1, content_ids=[2], has_video=True, ratios=["9:16"])]
+    cl = checklist(make_ds([make_group(1), make_group(2)], bs, coverage={**PATH_A}))
+    assert row(cl, "E2")["status"] == "pass" and row(cl, "E5")["status"] == "pass"
+    same = [make_banner(11, 1, content_ids=[1], ratios=["1:1"]), make_banner(12, 1, content_ids=[2], ratios=["1:1"])]
+    cl = checklist(make_ds([make_group(1), make_group(2)], same, coverage={**PATH_A}))
+    assert row(cl, "E2")["status"] == "unknown" and row(cl, "E5")["status"] == "unknown"
+
+
+# ---- R11. Без внутреннего жаргона в HTML ----
+
+def test_no_internal_jargon_in_html():
+    from scripts.render_report import render
+    g = make_group(1, segment_ids=[3], keyword_segment_ids=[3], layer="cold", layer_subtype="keywords")
+    ds = make_ds([g, make_group(2, layer="warm", layer_guessed=True, segment_ids=[6])],
+                 segments=[{"id": 5, "name": "a", "lal": True, "size": None}], notes=[])
+    ds["coverage"]["path"] = "A"
+    html = render(ds, {**res(ds), "checklist": checklist(ds)}, {"calls": []})
+    for word in ("живым прогоном", "MCP", "relations", "не LAL", "сущность", "через модель"):
+        assert word not in html, word
 
 
 # ---- R13. Находка по группе на паузе — так и сказано ----

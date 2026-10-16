@@ -215,7 +215,7 @@ def _guessed(g) -> bool:
     return bool(g.get("layer_guessed")) and g.get("layer") is not None
 
 
-GUESSED_REASON = "тип сегментов не подтверждён связями (relations) — слой определён по догадке «не LAL — тёплый»"
+GUESSED_REASON = ("VK не сообщил тип части сегментов — слой (тёплый, похожие, холодный) определён по догадке")
 
 
 def _active_banners(ds, g, th) -> list:

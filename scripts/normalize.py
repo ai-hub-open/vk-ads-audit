@@ -558,7 +558,7 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
 
     relations_known = any(k in observed_s for k in SEGMENT_RELATION_KEYS)
     if seg_items and not relations_known and not any(k in observed_s for k in SIZE_KEYS):
-        notes.append("MCP не возвращает размер сегментов и связи с базами клиентов — размер LAL-сегментов и "
+        notes.append("VK не отдаёт через API размер сегментов и связи с базами клиентов — размер LAL-сегментов и "
                      "обновление баз клиентов не проверялись.")
     lists_collected = bool(read_calls(raw_dir, "vk_ads_users_lists_list"))
     lists_no_access = _no_access_to_lists(collect_log)
