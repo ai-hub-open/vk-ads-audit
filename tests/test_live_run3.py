@@ -298,3 +298,40 @@ def test_direct_keywords_keep_their_checks_next_to_segments():
     ds = make_ds([g1, g2])
     assert found(ds, "no_minus_phrases") and row(checklist(ds), "C7")["status"] == "fail"
     assert row(checklist(ds), "C6")["status"] == "pass"
+
+
+# ---- 1.4. Объявления собраны по выборке (путь A, топ-5) — «нет данных», найденное — ❌ ----
+
+PATH_A = {"path": "A", "banners": True, "banner_groups": [1], "summary": True, "stats": True, "pixels": True,
+          "metrika": False}
+SAMPLE = "проверено 2 объявления в 1 группе из 3 активных, нарушений нет"
+
+
+def _sample(**banner_kw):
+    bs = [make_banner(11, 1, erid="X1", urls=["https://shop.example/?utm_source=vk"], **banner_kw),
+          make_banner(12, 1, erid="X2", urls=["https://shop.example/?utm_source=vk"])]
+    return make_ds([make_group(1, auto_utm=False), make_group(2), make_group(3)], bs, coverage=dict(PATH_A))
+
+
+def test_sample_gives_unknown_with_counts_for_a2_a3_e8_e9():
+    cl = checklist(_sample())
+    for cid in ("A2", "A3", "E8", "E9", "E6"):
+        assert (row(cl, cid)["status"], row(cl, cid)["reason"]) == ("unknown", SAMPLE), cid
+
+
+def test_sample_violation_stays_fail():
+    assert row(checklist(_sample(moderation_status="banned")), "E8")["status"] == "fail"
+    ds = _sample()
+    ds["banners"][0]["erid"] = ""
+    assert row(checklist(ds), "A2")["status"] == "fail"
+    ds = _sample()
+    ds["banners"][0]["urls"] = ["https://shop.example/catalog"]
+    assert row(checklist(ds), "A3")["status"] == "fail"
+
+
+def test_full_coverage_still_passes():
+    ds = _sample()
+    ds["coverage"]["banner_groups"] = [1, 2, 3]
+    ds["groups"][1]["banner_ids"] = []
+    cl = checklist(make_ds(ds["groups"][:1], ds["banners"]))
+    assert {cid: row(cl, cid)["status"] for cid in ("A2", "A3", "E8")} == dict.fromkeys(("A2", "A3", "E8"), "pass")

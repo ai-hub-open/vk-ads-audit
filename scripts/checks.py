@@ -98,8 +98,18 @@ def run_checks(ds: dict, th: dict, findings: list, evaluated: dict | None = None
         "unknown", "слои аудиторий не определены — таргетинги не получены"))
 
     covered = _banner_groups(ds)
-    partial_gate = ("unknown", "объявления собраны не по всем группам") if any(
-        g["id"] not in covered for g in live) else OK
+
+    def sample_gate(n):
+        """Третий живой прогон (путь A: объявления только у топ-5 групп): «нет данных» с размером выборки; находка
+        в выборке по-прежнему даёт ❌ (by_rules), гейт заменяет только ✅."""
+        if not any(g["id"] not in covered for g in live):
+            return OK
+        m = sum(1 for g in live if g["id"] in covered)
+        return ("unknown", f"проверено {n} {plural(n, 'объявление', 'объявления', 'объявлений')} в {m} "
+                f"{plural(m, 'группе', 'группах', 'группах')} из {len(live)} активных, нарушений нет")
+
+    partial_gate = sample_gate(len(banners))
+    all_banners = [b for b in _banners(ds) if b["status"] != "deleted"]   # E8, E9: и неактивные объявления
     banner_base = _first(no_active, no_banners, partial_gate, banners_gate)   # свойства активных объявлений
     keys_gate = _known_feature(live, "keys", "ключи таргетинга")
     targeting_gate = _first(no_active, ("unknown", "таргетинги не получены") if keys_gate[0] else OK)
@@ -116,9 +126,10 @@ def run_checks(ds: dict, th: dict, findings: list, evaluated: dict | None = None
     by_rules("A1", "Пиксель установлен", ["no_pixel"], pixel_gate)
     by_rules("A2", "Креативы промаркированы (erid)", ["ord_missing"],
              _first(no_active, no_banners, banners_gate, OK if any(b.get("erid") is not None for b in banners)
-                    else _unknown("erid / маркировка ОРД")))
+                    else _unknown("erid / маркировка ОРД"), partial_gate))
     # Авто-UTM без ключа enable_utm — «не подтверждено» (None): реальная находка ❌ остаётся, иначе ✅ не ставим.
-    a3_gate = _first(no_active, no_banners, banners_gate, _known_banner(banners, "urls", "ссылки объявлений"))
+    a3_gate = _first(no_active, no_banners, banners_gate, _known_banner(banners, "urls", "ссылки объявлений"),
+                     partial_gate)
     unconfirmed = utm_unconfirmed_groups(ds, th)
     if not a3_gate[0] and not fired.get("utm_missing") and unconfirmed:
         a3_gate = ("unknown", utm_unconfirmed_reason(len(unconfirmed)))
@@ -259,8 +270,10 @@ def run_checks(ds: dict, th: dict, findings: list, evaluated: dict | None = None
     by_rules("E7", "Конкретная кнопка", ["generic_button"],
              _first(banner_base, OK if any(b.get("cta") for b in banners)
                     else ("unknown", "кнопка не задана в объявлениях (call_to_action пустой)")))
-    by_rules("E8", "Нет отклонённых объявлений", ["rejected_banners"], _first(no_live, no_banners))
-    by_rules("E9", "Модерация не затянулась", ["moderation_stuck"], _first(no_live, no_banners))
+    by_rules("E8", "Нет отклонённых объявлений", ["rejected_banners"],
+             _first(no_live, no_banners, sample_gate(len(all_banners))))
+    by_rules("E9", "Модерация не затянулась", ["moderation_stuck"],
+             _first(no_live, no_banners, sample_gate(len(all_banners))))
 
     # F
     by_rules("F1", "CTR не ниже 0,3 %", ["low_ctr"], _first(no_live, no_stats))

@@ -17,14 +17,16 @@ from html import escape
 try:
     from scripts._console import setup_console
     from scripts._workspace import resolve_workspace
-    from scripts.diagnose import _banners, bidding_label, load_thresholds, utm_unconfirmed_groups, utm_unconfirmed_text
+    from scripts.diagnose import (_banners, bidding_label, load_thresholds, utm_unconfirmed_groups,
+                                  utm_unconfirmed_reason, utm_unconfirmed_text)
     from scripts.features import group_status_label, is_live_group
     from scripts.normalize import zero_spend_head
     from scripts.raw_store import mark_recovered
 except ImportError:  # запуск напрямую
     from _console import setup_console
     from _workspace import resolve_workspace
-    from diagnose import _banners, bidding_label, load_thresholds, utm_unconfirmed_groups, utm_unconfirmed_text
+    from diagnose import (_banners, bidding_label, load_thresholds, utm_unconfirmed_groups, utm_unconfirmed_reason,
+                          utm_unconfirmed_text)
     from features import group_status_label, is_live_group
     from normalize import zero_spend_head
     from raw_store import mark_recovered
@@ -125,7 +127,9 @@ def limitations(ds: dict, collect_log=None, checklist=None, th=None) -> list:
         lines.append(utm_unconfirmed_text(len(unconfirmed)))
     for b in (checklist or {}).get("blocks", []):
         for c in b["checks"]:
-            if c["status"] == "unknown" and not (c["id"] == "A3" and unconfirmed):
+            # A3 по неподтверждённой авто-UTM — своя строка выше; другую причину A3 (выборка объявлений) не теряем
+            if c["status"] == "unknown" and not (c["id"] == "A3" and unconfirmed
+                                                 and c["reason"] == utm_unconfirmed_reason(len(unconfirmed))):
                 lines.append(f"Не проверено «{c['title']}»: {c['reason']}")
     return lines
 
