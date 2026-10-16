@@ -335,3 +335,36 @@ def test_full_coverage_still_passes():
     ds["groups"][1]["banner_ids"] = []
     cl = checklist(make_ds(ds["groups"][:1], ds["banners"]))
     assert {cid: row(cl, cid)["status"] for cid in ("A2", "A3", "E8")} == dict.fromkeys(("A2", "A3", "E8"), "pass")
+
+
+# ---- 1.5. Возраст креатива: недавно редактированное объявление — дата смены креатива не видна ----
+
+OLD = {"created": "2025-08-01 00:00:00", "age_days": 425}
+EDITED = "объявление редактировалось, дата смены креатива не видна"
+
+
+def _top(*banners):
+    return make_ds([make_group(1, stats=stats(5000, 50000, 500, 50))], list(banners))
+
+
+def test_recently_edited_banner_is_unknown_not_old():
+    ds = _top(make_banner(11, 1, updated="2026-09-25 10:00:00", **OLD),
+              make_banner(12, 1, updated="2026-10-05 10:00:00", **OLD))       # правка и после конца периода
+    assert found(ds, "stale_creatives") == []
+    e4 = row(checklist(ds), "E4")
+    assert (e4["status"], e4["reason"]) == ("unknown", EDITED)
+
+
+def test_finding_stays_on_honestly_old_banners():
+    ds = _top(make_banner(11, 1, updated="2026-09-25 10:00:00", **OLD),
+              make_banner(12, 1, updated="2025-12-01 10:00:00", created="2025-10-01 00:00:00", age_days=364))
+    f = found(ds, "stale_creatives")
+    assert len(f) == 1 and f[0]["evidence"]["newest_creative_age_days"] == 364
+    assert f[0]["evidence"]["edited_recently"] == 1
+    assert row(checklist(ds), "E4")["status"] == "fail"
+
+
+def test_fresh_banner_still_passes():
+    ds = _top(make_banner(11, 1, updated="2026-09-25 10:00:00", **OLD),
+              make_banner(12, 1, created="2026-09-25 00:00:00", updated="2026-09-25 00:00:00", age_days=5))
+    assert found(ds, "stale_creatives") == [] and row(checklist(ds), "E4")["status"] == "pass"

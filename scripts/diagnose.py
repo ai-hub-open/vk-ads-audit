@@ -811,25 +811,50 @@ def _top_groups(ds, th) -> list:
     return out
 
 
-@rule
-def stale_creatives(ds, th, ctx):
+def edited_recently(b, ds, th) -> bool:
+    """Объявление создано давно, но правилось внутри порога свежести (или после конца периода): VK не отдаёт дату
+    смены креатива, поэтому «креатив старый» по нему утверждать нельзя (третий живой прогон)."""
+    u = _date(b.get("updated"))
+    end = date.fromisoformat(ds["period"]["to"])
+    return (u is not None and b.get("age_days") is not None and b["age_days"] > th["creative_stale_days"]
+            and (end - u).days <= th["creative_stale_days"])
+
+
+def _stale_candidates(ds, th):
+    """(группа, все активные объявления, честно датированные) для топ-групп с собранными объявлениями и
+    известным возрастом каждого объявления."""
     covered = _banner_groups(ds)
-    out = []
     for g in _top_groups(ds, th):
         banners = _active_banners(ds, g, th)
         if g["id"] not in covered or not banners or any(b.get("age_days") is None for b in banners):
             continue   # возраст одного из объявлений не известен — свежесть группы не оценить
+        yield g, banners, [b for b in banners if not edited_recently(b, ds, th)]
+
+
+def stale_undetermined_groups(ds, th) -> list:
+    """Топ-группы, где все активные объявления недавно правились: свежесть креатива не определить (E4 «unknown»)."""
+    return [g["id"] for g, _, honest in _stale_candidates(ds, th) if not honest]
+
+
+@rule
+def stale_creatives(ds, th, ctx):
+    out = []
+    for g, banners, honest in _stale_candidates(ds, th):
+        if not honest:   # все объявления правились недавно — дата смены креатива не видна, молчим
+            continue
         _seen(ctx, "stale_creatives")
-        newest = min(b["age_days"] for b in banners)
+        newest = min(b["age_days"] for b in honest)   # находка — по честно старым; правленые — «нет данных»
         if newest > th["creative_stale_red_days"]:
             level = "orange"
         elif newest > th["creative_stale_days"]:
             level = "white"
         else:
             continue
+        evidence = {"newest_creative_age_days": newest}
+        if len(honest) < len(banners):
+            evidence["edited_recently"] = len(banners) - len(honest)
         out.append(finding("stale_creatives", level, "group", g, "Креативы в топ-группе давно не обновлялись",
-                           {"newest_creative_age_days": newest},
-                           "Обновить угол подачи: новый сценарий, боль или оффер (не только дизайн)"))
+                           evidence, "Обновить угол подачи: новый сценарий, боль или оффер (не только дизайн)"))
     return out
 
 

@@ -18,11 +18,12 @@ from collections import defaultdict
 
 try:
     from scripts.diagnose import (ASK_FUNNELS, FUNNEL_LABELS, GUESSED_REASON, _active, _guessed, _banner_groups, _banners, _date, _feat, _layer,
-                                  _live, _measured, _run_days, funnel_status, plural, utm_unconfirmed_groups,
-                                  utm_unconfirmed_reason)
+                                  _live, _measured, _run_days, funnel_status, plural, stale_undetermined_groups,
+                                  utm_unconfirmed_groups, utm_unconfirmed_reason)
 except ImportError:  # запуск напрямую
     from diagnose import (ASK_FUNNELS, FUNNEL_LABELS, GUESSED_REASON, _active, _guessed, _banner_groups, _banners, _date, _feat, _layer, _live,
-                          _measured, _run_days, funnel_status, plural, utm_unconfirmed_groups, utm_unconfirmed_reason)
+                          _measured, _run_days, funnel_status, plural, stale_undetermined_groups, utm_unconfirmed_groups,
+                          utm_unconfirmed_reason)
 
 BLOCKS = [("A", "Техническая настройка"), ("B", "Структура аккаунта"), ("C", "Таргетинг"),
           ("D", "Бюджет и стратегия"), ("E", "Объявления"), ("F", "Эффективность"),
@@ -247,7 +248,9 @@ def run_checks(ds: dict, th: dict, findings: list, evaluated: dict | None = None
              _first(no_active, no_banners, partial_gate))   # нет активных объявлений — это и есть находка 🟠
     by_rules("E4", "Свежие креативы в топ-группах", ["stale_creatives"],
              _first(banner_base, ("unknown", "дата создания известна не у всех объявлений")
-                    if any(b.get("age_days") is None for b in banners) else OK))
+                    if any(b.get("age_days") is None for b in banners) else OK,
+                    ("unknown", "объявление редактировалось, дата смены креатива не видна")
+                    if stale_undetermined_groups(ds, th) else OK))
     classified_banners = [b for b in banners if b.get("ratios") or b.get("has_video") or b.get("ratios_unknown")]
     e5_gate = _first(banner_base, content_gate,
                      OK if len(classified_banners) >= 2 else ("unknown", "форматы определены меньше чем у двух объявлений"))
