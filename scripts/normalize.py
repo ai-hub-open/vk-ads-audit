@@ -311,6 +311,12 @@ def _account_spent(raw_dir: Path, period: tuple, collect_log):
     return None if v is None or isinstance(v, bool) else round(float(v), 2)
 
 
+def _after(stamp, d_to: date) -> bool:
+    """Дата изменения (updated) позже конца периода: кабинет правили после него."""
+    dt = parse_dt(stamp)
+    return bool(dt and dt.date() > d_to)
+
+
 def _groups_gen(n: int) -> str:
     """«для 1 группы», «для 5 групп»."""
     return f"{n} {plural(n, 'группы', 'групп', 'групп')}"
@@ -365,6 +371,7 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
 
     raw_plans = _list_items(raw_dir, "vk_ads_ad_plans_list")
     plan_status = {p.get("id"): p.get("status") for p in raw_plans}
+    plan_changed = {p.get("id"): _after(p.get("updated"), d_to) for p in raw_plans}
     objective_of: dict = {}
     unmeasured_freq: list = []
     groups = []
@@ -394,6 +401,9 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
             "budget_day_rub": _rub(g.get("budget_limit_day")),
             "budget_total_rub": _rub(g.get("budget_limit")),
             "issues": _codes(g.get("issues")), "created": g.get("created"), "date_end": g.get("date_end"),
+            "updated": g.get("updated"),
+            # группу или её кампанию правили после конца периода: статус и бюджет — на дату сбора, не на период
+            "changed_after_period": _after(g.get("updated"), d_to) or plan_changed.get(g.get("ad_plan_id"), False),
             "targeting_key": targeting_key(g.get("targetings")),
             "segment_ids": _segment_ids(g.get("targetings")),
             "excluded_segment_ids": _segment_ids(g.get("targetings"), excluded=True),
@@ -471,7 +481,7 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
     def plan_out(p):
         day, total = _rub(p.get("budget_limit_day")), _rub(p.get("budget_limit"))
         return {"id": p.get("id"), "name": p.get("name") or "", "status": p.get("status"),
-                "budget_day_rub": day, "budget_total_rub": total,
+                "updated": p.get("updated"), "budget_day_rub": day, "budget_total_rub": total,
                 "has_budget": bool(day or total) if plan_budget_known else None}
 
     observed_s = observed_keys(seg_items)
@@ -507,6 +517,9 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
         "as_of": as_of or datetime.now().isoformat(timespec="minutes"),
         "totals_windows": windows_of([r for g in counted for r in g["daily"]], d_from, d_to),
         "notes": notes,
+        # хотя бы одну кампанию или группу правили после конца периода — отчёт предупредит: статусы и бюджеты на дату сбора
+        "changed_after_period": any(g["changed_after_period"] for g in groups)
+        or any(plan_changed.values()),
         # расход живых групп известен (статистика есть по всем) и равен 0 — отчёт с плашкой; архивные не в счёт
         "zero_spend": bool(live_groups and has_stats and not absent
                            and aggregate([g["stats"] for g in live_groups])["spent"] == 0),

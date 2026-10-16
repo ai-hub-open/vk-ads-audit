@@ -48,9 +48,10 @@ h1{font-size:22px;margin:0 0 4px}h2{font-size:17px;margin:28px 0 8px;border-bott
 .f h3{font-size:15px;margin:0 0 4px}.f.explained{background:#f6f6f6;color:#555}.note{font-style:italic}table{border-collapse:collapse;width:100%;font-size:13px}
 td,th{border-bottom:1px solid #eee;padding:4px 6px;text-align:left}th{background:#fafafa}
 .alert{border:2px solid #c62828;background:#fdecea;color:#7f1d1d;border-radius:8px;padding:14px 18px;
-margin:16px 0;font-size:17px;font-weight:600}.score{font-weight:600}.st-pass{color:#1a7f37}.st-fail{color:#c62828}.st-unk{color:#888}.st-pot{color:#1a7f37}
+margin:16px 0;font-size:17px;font-weight:600}.warn{border-left:4px solid #b26a00;background:#fff6e5;padding:8px 12px}.score{font-weight:600}.st-pass{color:#1a7f37}.st-fail{color:#c62828}.st-unk{color:#888}.st-pot{color:#1a7f37}
 @media print{body{margin:0}.f{break-inside:avoid}}
 """
+CHANGED_AFTER_PERIOD = "Кабинет менялся после конца периода: статусы и бюджеты показаны на дату сбора."
 ZERO_SPEND_TAIL = " — выводов по расходу и результату нет, проверены только настройки кабинета."
 
 
@@ -206,6 +207,7 @@ def render(ds: dict, findings: dict, collect_log=None, title: str = "", th=None)
              f"<p class='muted'>Период {ds['period']['from']} — {ds['period']['to']} · путь {ds['coverage']['path']}"
              f" · опорный CPA: {fmt_rub(ref)} ({ref_note})</p>",
              f"<div class='alert'>{escape(zero_spend_text(ds))}</div>" if ds.get("zero_spend") else "",
+             f"<p class='warn'>{CHANGED_AFTER_PERIOD}</p>" if ds.get("changed_after_period") else "",
              "<div class='tiles'>" + "".join(f"<div class='tile'>{k}<b>{v}</b></div>" for k, v in tiles) + "</div>",
              _metrika_total_html(ds.get("metrika_total")),
              _checklist_html(findings.get("checklist")),

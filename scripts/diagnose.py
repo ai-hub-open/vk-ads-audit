@@ -58,6 +58,10 @@ def utm_unconfirmed_text(n: int) -> str:
     return r[0].upper() + r[1:] + "."
 
 
+def _rub_text(v) -> str:
+    return f"{v:,.0f} ₽".replace(",", " ")
+
+
 def rule(fn):
     RULES.append(fn)
     return fn
@@ -1037,7 +1041,18 @@ def scale_leader(ds, th, ctx):
             continue
         _seen(ctx, "scale_leader")
         avg = sum(spend_days) / len(spend_days)
-        if s["cpa"] <= ref * th["leader_cpa_ratio"] and avg >= b * th["leader_budget_use"]:
+        if s["cpa"] > ref * th["leader_cpa_ratio"] or avg < b * th["leader_budget_use"]:
+            continue
+        if g.get("changed_after_period") and b < avg:
+            # Третий живой прогон: бюджет урезали в день сбора — «+50 %» и «упирается» были бы советом по чужим цифрам.
+            out.append(finding("leader_budget_changed", "white", "group", g,
+                               f"Бюджет менялся после периода: сейчас {_rub_text(b)} при расходе {_rub_text(avg)} "
+                               "в день — проверьте актуальность",
+                               {"cpa": s["cpa"], "ref_cpa": ref, "avg_daily_spent": round(avg, 2),
+                                "budget_day_rub": b},
+                               "Сверить текущий дневной бюджет с планом; решение о масштабировании — после сверки",
+                               conf=confidence(s["clicks"], th)))
+        else:
             out.append(finding("scale_leader", "green", "group", g, "Лидер упирается в бюджет",
                                {"cpa": s["cpa"], "ref_cpa": ref, "avg_daily_spent": round(avg, 2),
                                 "budget_day_rub": b},

@@ -114,8 +114,8 @@ def test_duplicates_only_among_really_running_groups():
 
 
 def _leader(gid=1, **kw):
-    return make_group(gid, stats=stats(30000, 300000, 3000, 300), daily=daily(30, 1000.0, 10000, 100, 10),
-                      budget_day_rub=1000.0, **kw)
+    kw.setdefault("budget_day_rub", 1000.0)
+    return make_group(gid, stats=stats(30000, 300000, 3000, 300), daily=daily(30, 1000.0, 10000, 100, 10), **kw)
 
 
 def _cheap_ref():
@@ -145,3 +145,53 @@ def test_report_shows_paused_by_plan_humanly():
     html = render(ds, {**res(ds), "checklist": checklist(ds)})
     assert "на паузе (кампания остановлена)" in html and "активна" in html
     assert "<td>active</td>" not in html and "<td>blocked</td>" not in html
+
+
+# ---- 1.2. Лидер и бюджет, изменённый после периода ----
+
+def _changed_cabinet(raw, group_upd, plan_upd):
+    from scripts.raw_store import write_call
+    write_call(raw, "vk_ads_ad_plans_list", {"paginated": True},
+               {"items": [{"id": 7, "name": "План", "status": "active", "updated": plan_upd}]})
+    write_call(raw, "vk_ads_campaigns_list", {"paginated": True},
+               {"items": [_active(1, ad_plan_id=7, updated=group_upd), _active(2, ad_plan_id=7,
+                                                                             updated="2026-08-01 10:00:00")]})
+
+
+def test_normalize_flags_changes_after_period(tmp_path):
+    for i, (gu, pu, want) in enumerate([("2026-10-01 09:00:00", "2026-10-02 10:00:00", True),   # группа позже конца
+                                       ("2026-09-20 09:00:00", "2026-10-01 00:00:01", True),   # кампания позже конца
+                                       ("2026-09-30 23:59:59", "2026-09-30 10:00:00", False)]):
+        raw = tmp_path / str(i) / "raw"
+        _changed_cabinet(raw, gu, pu)
+        ds = build_dataset(raw, *D)
+        g1 = ds["groups"][0]
+        assert g1["updated"] == gu and ds["plans"][0]["updated"] == pu
+        assert g1["changed_after_period"] is want and ds["changed_after_period"] is want, (gu, pu)
+
+
+def test_scale_leader_budget_cut_after_period_is_not_plus_50():
+    lead = _leader(1, changed_after_period=True, budget_day_rub=500.0)        # расход 1000 ₽ в день, бюджет 500
+    ds = make_ds([lead, _cheap_ref()])
+    assert found(ds, "scale_leader") == []
+    f = found(ds, "leader_budget_changed")
+    assert len(f) == 1 and f[0]["level"] == "white" and f[0]["effect_rub"] == 0
+    assert f[0]["title"] == "Бюджет менялся после периода: сейчас 500 ₽ при расходе 1 000 ₽ в день — проверьте актуальность"
+    assert "50 %" not in f[0]["action"] and "упирается" not in f[0]["title"]
+
+
+def test_scale_leader_unchanged_or_budget_not_cut_stays_green():
+    for g in (_leader(1, changed_after_period=False, budget_day_rub=900.0),      # не меняли — как было
+              _leader(1, changed_after_period=True, budget_day_rub=1050.0)):     # меняли, но бюджет не ниже расхода
+        ds = make_ds([g, _cheap_ref()])
+        assert [f["level"] for f in found(ds, "scale_leader")] == ["green"]
+        assert found(ds, "leader_budget_changed") == []
+
+
+def test_report_warns_when_cabinet_changed_after_period():
+    from scripts.render_report import render
+    text = "Кабинет менялся после конца периода: статусы и бюджеты показаны на дату сбора"
+    ds = make_ds([make_group(1)], changed_after_period=True)
+    assert text in render(ds, {**res(ds), "checklist": checklist(ds)})
+    ds = make_ds([make_group(1)])
+    assert text not in render(ds, {**res(ds), "checklist": checklist(ds)})
