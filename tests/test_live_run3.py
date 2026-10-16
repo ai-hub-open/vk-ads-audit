@@ -368,3 +368,50 @@ def test_fresh_banner_still_passes():
     ds = _top(make_banner(11, 1, updated="2026-09-25 10:00:00", **OLD),
               make_banner(12, 1, created="2026-09-25 00:00:00", updated="2026-09-25 00:00:00", age_days=5))
     assert found(ds, "stale_creatives") == [] and row(checklist(ds), "E4")["status"] == "pass"
+
+
+# ---- 1.6. Конверсии — «Результат» VK (base.vk.result), все цели пикселя — справочно ----
+
+def _block(goals, result, spent="1000", shows=10000, clicks=100):
+    return {"base": {"spent": spent, "shows": shows, "clicks": clicks, "goals": goals, "ctr": 1.0,
+                     "vk": {"goals": result, "result": result, "cpr": "0"}}}
+
+
+def test_site_conversions_use_vk_result_and_keep_all_goals():
+    from scripts.normalize import stats_from
+    for objective in ("site_conversions", "leadads", "socialengagement", None):
+        s = stats_from(_block(goals=380, result=100), objective)
+        assert s["conversions"] == 100 and s["goals_all"] == 380, objective
+        assert s["cpa"] == 10.0                                   # расход / результат
+    s = stats_from(_block(goals=150, result=20, clicks=100), "site_conversions")   # целей больше кликов
+    assert s["conversions"] == 20
+
+
+def test_legacy_block_without_vk_falls_back_to_goals_with_note(tmp_path):
+    raw = tmp_path / "raw"
+    rows = [{"date": "2026-09-01", "base": {"spent": "100", "shows": 1000, "clicks": 10, "goals": 3, "ctr": 1.0}}]
+    cabinet(raw, [_active(1, objective="site_conversions")], daily={1: rows})
+    ds = build_dataset(raw, *D)
+    assert ds["groups"][0]["stats"]["conversions"] == 3
+    assert any("«Результат» VK не пришёл" in n for n in ds["notes"])
+
+
+def test_totals_keep_goals_all_and_report_explains_source(tmp_path):
+    from scripts.render_report import render
+    raw = tmp_path / "raw"
+    rows = [{"date": f"2026-09-0{d}", **_block(goals=38, result=10, spent="500", shows=5000, clicks=50)}
+            for d in range(1, 4)]
+    cabinet(raw, [_active(1, objective="site_conversions")], daily={1: rows})
+    ds = build_dataset(raw, *D)
+    assert ds["totals"]["conversions"] == 30 and ds["totals"]["goals_all"] == 114
+    html = render(ds, {**res(ds), "checklist": checklist(ds)})
+    assert "Конверсии — результат по цели оптимизации (как «Результат» в кабинете VK)" in html
+    assert "все цели пикселя (справочно)" in html and "114" in html
+
+
+def test_rules_do_not_read_goals():
+    import inspect
+    from scripts import checks, diagnose, quick
+    for mod in (diagnose, checks, quick):
+        src = inspect.getsource(mod)
+        assert '"goals"' not in src and "'goals'" not in src and "goals_all" not in src, mod.__name__

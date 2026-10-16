@@ -7,7 +7,10 @@ normalize.py — raw/ → dataset.json. Единицы приводятся ТО
 - итоги периода — сумма строк statistics_day: statistics_summary отдаёт только всё время (даты в неё не передаются),
   поэтому охват и частота берутся из сводки только для групп, чья жизнь целиком в периоде;
 - metrics=base у дней: блока uniques нет — охват и частота «не определены» (None), а не 0;
-- конверсии: base.goals, для целей из CONVERSION_SOURCE — base.vk.result.
+- конверсии — base.vk.result («Результат» по цели оптимизации, как в кабинете VK; решение методиста, третий живой
+  прогон: base.goals — все цели пикселя, у site_conversions в разы больше результата и бывает больше кликов); CPA =
+  расход / результат. base.goals хранится справочно (goals_all). Блока vk нет (старые raw/) — конверсии из goals,
+  с заметкой в «Ограничениях». Проверки здравого смысла на goals не опираются.
 Проверка здравого смысла (check_sanity) останавливает аудит на кривых числах.
 Нулевой расход (spend_state): нет живых групп и расхода нет — код 5, dataset.json не пишется (аудит строить не на чем;
 статистика по архивным не получена — код 3, «статистика не получена»); живые группы есть, их расход известен и равен 0 —
@@ -47,7 +50,9 @@ except ImportError:  # запуск напрямую
     from collect import total_spend
     from raw_store import items_of, mark_recovered, read_calls
 
-CONVERSION_SOURCE = {"leadads": "vk.result", "socialengagement": "vk.result"}
+CONVERSION_SOURCE = "vk.result"   # для всех целей: «Результат» VK по цели оптимизации; base.goals — справочно
+CONVERSION_NOTE = ("Конверсии части статистики взяты из всех целей пикселя: показатель «Результат» VK не пришёл — "
+                   "конверсии и CPA по таким строкам могут быть завышены.")
 NOT_TARGETING = ("fulltime",)
 
 
@@ -81,22 +86,35 @@ def _ratios(spent: float, shows: int, clicks: int, conv: int) -> dict:
             "cpa": round(spent / conv, 2) if conv else None}
 
 
+def _conversions(b: dict) -> tuple:
+    """(конверсии, взяты ли из goals). «Результат» VK — vk.result (vk.goals ему равен); нет блока vk — base.goals."""
+    vk = b.get("vk")
+    if isinstance(vk, dict):
+        v = next((vk[k] for k in ("result", "goals") if vk.get(k) not in (None, "")), None)
+        if v is not None:
+            return int(v), False
+    goals = int(b.get("goals") or 0)
+    return goals, bool(goals)
+
+
 def stats_from(block, objective) -> dict:
+    """objective оставлен для совместимости: источник конверсий один для всех целей (CONVERSION_SOURCE)."""
     block = block or {}
     b = block.get("base") or {}
     u = block.get("uniques") or {}
     spent = round(money(b.get("spent")), 2)
     shows = int(b.get("shows") or 0)
     clicks = int(b.get("clicks") or 0)
-    if CONVERSION_SOURCE.get(objective or "") == "vk.result":
-        conv = int((b.get("vk") or {}).get("result") or 0)
-    else:
-        conv = int(b.get("goals") or 0)
-    return {"spent": spent, "shows": shows, "clicks": clicks, "conversions": conv,
-            **_ratios(spent, shows, clicks, conv),
-            "vk_ctr_pct": None if b.get("ctr") in (None, "") else round(float(b["ctr"]), 4),   # у VK уже проценты
-            "reach": None if u.get("reach") in (None, "") else int(u["reach"]),   # нет uniques — нет данных, не 0
-            "frequency": float(u.get("frequency") or 0) or None}
+    conv, from_goals = _conversions(b)
+    out = {"spent": spent, "shows": shows, "clicks": clicks, "conversions": conv,
+           "goals_all": int(b.get("goals") or 0),   # все цели пикселя — справочно, правила на них не смотрят
+           **_ratios(spent, shows, clicks, conv),
+           "vk_ctr_pct": None if b.get("ctr") in (None, "") else round(float(b["ctr"]), 4),   # у VK уже проценты
+           "reach": None if u.get("reach") in (None, "") else int(u["reach"]),   # нет uniques — нет данных, не 0
+           "frequency": float(u.get("frequency") or 0) or None}
+    if from_goals:
+        out["conversions_from_goals"] = True   # старый ответ без «Результата» VK — заметка в «Ограничениях»
+    return out
 
 
 def aggregate(rows: list) -> dict:
@@ -104,8 +122,12 @@ def aggregate(rows: list) -> dict:
     shows = sum(r["shows"] for r in rows)
     clicks = sum(r["clicks"] for r in rows)
     conv = sum(r["conversions"] for r in rows)
-    return {"spent": spent, "shows": shows, "clicks": clicks, "conversions": conv,
-            **_ratios(spent, shows, clicks, conv), "vk_ctr_pct": None, "reach": None, "frequency": None}
+    out = {"spent": spent, "shows": shows, "clicks": clicks, "conversions": conv,
+           "goals_all": sum(r.get("goals_all") or 0 for r in rows),
+           **_ratios(spent, shows, clicks, conv), "vk_ctr_pct": None, "reach": None, "frequency": None}
+    if any(r.get("conversions_from_goals") for r in rows):
+        out["conversions_from_goals"] = True
+    return out
 
 
 def _canon(v):
@@ -475,6 +497,9 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
                 notes.append(f"Сумма по объявлениям меньше расхода группы {g['id']} "
                              "(часть объявлений удалена?)")
 
+    if any(g["stats"].get("conversions_from_goals") for g in groups if g["status"] != "deleted") or any(
+            (b["stats"] or {}).get("conversions_from_goals") for b in banner_out):
+        notes.append(CONVERSION_NOTE)
     no_freq = [g for g in live_groups if g["id"] in unmeasured_freq and g["stats"]["shows"] > 0]
     if no_freq:
         notes.append(f"Частота и охват за период не определены для {_groups_gen(len(no_freq))}: статистика VK отдаёт их "

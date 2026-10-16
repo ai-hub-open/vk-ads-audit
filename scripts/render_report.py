@@ -147,6 +147,16 @@ def _finding_html(f) -> str:
             f'<table>{ev}</table>{effect}<p>Действие: {escape(f["action"])}</p>{note_html}</div>')
 
 
+CONVERSION_SOURCE_TEXT = "Конверсии — результат по цели оптимизации (как «Результат» в кабинете VK)"
+
+
+def _conversion_source_html(totals) -> str:
+    """Из какого показателя взяты конверсии (решение методиста: vk.result), base.goals — справочно."""
+    goals = totals.get("goals_all")
+    extra = f"; все цели пикселя (справочно): {_num(goals)}" if isinstance(goals, int) and goals else ""
+    return f"<p class='muted'>{CONVERSION_SOURCE_TEXT}{extra}.</p>"
+
+
 def _metrika_total_html(total) -> str:
     if not isinstance(total, dict):
         return ""
@@ -213,6 +223,7 @@ def render(ds: dict, findings: dict, collect_log=None, title: str = "", th=None)
              f"<div class='alert'>{escape(zero_spend_text(ds))}</div>" if ds.get("zero_spend") else "",
              f"<p class='warn'>{CHANGED_AFTER_PERIOD}</p>" if ds.get("changed_after_period") else "",
              "<div class='tiles'>" + "".join(f"<div class='tile'>{k}<b>{v}</b></div>" for k, v in tiles) + "</div>",
+             _conversion_source_html(t),
              _metrika_total_html(ds.get("metrika_total")),
              _checklist_html(findings.get("checklist")),
              _ord_status_html(ds, th),
