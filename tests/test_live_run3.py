@@ -357,15 +357,6 @@ def test_recently_edited_banner_is_unknown_not_old():
     assert (e4["status"], e4["reason"]) == ("unknown", EDITED)
 
 
-def test_finding_stays_on_honestly_old_banners():
-    ds = _top(make_banner(11, 1, updated="2026-09-25 10:00:00", **OLD),
-              make_banner(12, 1, updated="2025-12-01 10:00:00", created="2025-10-01 00:00:00", age_days=364))
-    f = found(ds, "stale_creatives")
-    assert len(f) == 1 and f[0]["evidence"]["newest_creative_age_days"] == 364
-    assert f[0]["evidence"]["edited_recently"] == 1
-    assert row(checklist(ds), "E4")["status"] == "fail"
-
-
 def test_fresh_banner_still_passes():
     ds = _top(make_banner(11, 1, updated="2026-09-25 10:00:00", **OLD),
               make_banner(12, 1, created="2026-09-25 00:00:00", updated="2026-09-25 00:00:00", age_days=5))
@@ -710,6 +701,25 @@ def test_header_on_goals_fallback():
     assert "результат по цели оптимизации" not in head and "справочно" not in head
 
 
+# ---- R4, R5. E4: нижняя оценка возраста, любая недавняя правка — «нет данных» по группе ----
+
+def test_e4_uses_lower_bound_age():
+    ds = _top(make_banner(11, 1, updated="2026-09-10 10:00:00", **OLD),          # правка 20 дней назад
+              make_banner(12, 1, updated="2026-09-08 10:00:00", **OLD))
+    f = found(ds, "stale_creatives")
+    assert len(f) == 1 and f[0]["level"] == "white" and f[0]["evidence"]["newest_creative_age_days"] == 20
+    from scripts.render_report import evidence_value
+    assert evidence_value("newest_creative_age_days", 20) == "не менее 20 дней"
+
+
+def test_e4_any_recent_edit_makes_group_unknown():
+    ds = _top(make_banner(11, 1, updated="2026-09-25 10:00:00", **OLD),
+              make_banner(12, 1, updated="2025-12-01 10:00:00", created="2025-10-01 00:00:00", age_days=364))
+    assert found(ds, "stale_creatives") == []
+    e4 = row(checklist(ds), "E4")
+    assert (e4["status"], e4["reason"]) == ("unknown", EDITED)
+
+
 # ---- R6. C6 «нет данных» — C7–C9 тоже ----
 
 def test_c7_c9_unknown_when_c6_unknown():
@@ -767,6 +777,16 @@ def test_e2_e5_pass_when_found_in_sample():
     same = [make_banner(11, 1, content_ids=[1], ratios=["1:1"]), make_banner(12, 1, content_ids=[2], ratios=["1:1"])]
     cl = checklist(make_ds([make_group(1), make_group(2)], same, coverage={**PATH_A}))
     assert row(cl, "E2")["status"] == "unknown" and row(cl, "E5")["status"] == "unknown"
+
+
+# ---- R10. layer_missing: LAL по имени — твёрдо, холодный по догадке — условно ----
+
+def test_layer_missing_split_lal_firm_cold_tentative():
+    ds = make_ds([make_group(1, layer="warm", layer_guessed=True, segment_ids=[6])])
+    by = {tuple(f["evidence"]["missing_layers"]): f for f in found(ds, "layer_missing")}
+    assert set(by) == {("lal",), ("cold",)}
+    assert not by[("lal",)].get("tentative") and by[("cold",)]["tentative"] is True
+    assert row(checklist(ds), "B2")["status"] == "fail"
 
 
 # ---- R11. Без внутреннего жаргона в HTML ----

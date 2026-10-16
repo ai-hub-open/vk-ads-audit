@@ -492,14 +492,21 @@ def layer_missing(ds, th, ctx):
     if not missing:
         return []
     names = {"lal": "похожие (LAL)", "cold": "холодный"}
+    action = "Добавить слой: LAL на клиентов и лиды или холодный тест на интересах и контексте"
+    guessed = any(_guessed(g) for g in live)
+    if not ("cold" in missing and guessed):
+        return [finding("layer_missing", "white", "account", ACCOUNT,
+                        "Не хватает слоя аудиторий: " + ", ".join(names[m] for m in missing),
+                        {"missing_layers": missing}, action)]
+    # Ревью: LAL опознаётся по имени и от догадки про слои не зависит — его отсутствие твёрдое; отсутствие холодного
+    # при слоях по догадке («тёплая» группа может быть холодной) — отдельная условная карточка.
+    out = [finding("layer_missing", "white", "account", ACCOUNT, "Не хватает слоя аудиторий: " + names["lal"],
+                   {"missing_layers": ["lal"]}, action)] if "lal" in missing else []
     f = finding("layer_missing", "white", "account", ACCOUNT,
-                "Не хватает слоя аудиторий: " + ", ".join(names[m] for m in missing),
-                {"missing_layers": missing},
-                "Добавить слой: LAL на клиентов и лиды или холодный тест на интересах и контексте")
-    if "cold" in missing and any(_guessed(g) for g in live):   # «тёплая» по догадке группа может быть холодной
-        f.update(confidence="low", tentative=True)
-        f["title"] += " (слои части групп определены по догадке)"
-    return [f]
+                "Не хватает слоя аудиторий: холодный (слои части групп определены по догадке)",
+                {"missing_layers": ["cold"]}, action, conf="low")
+    f["tentative"] = True
+    return out + [f]
 
 
 @rule
@@ -859,41 +866,54 @@ def edited_recently(b, ds, th) -> bool:
             and (end - u).days <= th["creative_stale_days"])
 
 
+def creative_age_lower_bound(b, ds):
+    """Нижняя оценка возраста креатива: min(дней с создания, дней с последней правки) — VK не отдаёт дату смены
+    креатива, правка могла её сменить (ревью: правка 20 дней назад не даёт «400 дней»)."""
+    u = _date(b.get("updated"))
+    if u is None:
+        return b["age_days"]
+    return max(min(b["age_days"], (date.fromisoformat(ds["period"]["to"]) - u).days), 0)
+
+
 def _stale_candidates(ds, th):
-    """(группа, все активные объявления, честно датированные) для топ-групп с собранными объявлениями и
-    известным возрастом каждого объявления."""
+    """(группа, активные объявления) для топ-групп с собранными объявлениями и известным возрастом каждого."""
     covered = _banner_groups(ds)
     for g in _top_groups(ds, th):
         banners = _active_banners(ds, g, th)
         if g["id"] not in covered or not banners or any(b.get("age_days") is None for b in banners):
             continue   # возраст одного из объявлений не известен — свежесть группы не оценить
-        yield g, banners, [b for b in banners if not edited_recently(b, ds, th)]
+        yield g, banners
+
+
+def _fresh(b, th) -> bool:
+    return b["age_days"] <= th["creative_stale_days"]
 
 
 def stale_undetermined_groups(ds, th) -> list:
-    """Топ-группы, где все активные объявления недавно правились: свежесть креатива не определить (E4 «unknown»)."""
-    return [g["id"] for g, _, honest in _stale_candidates(ds, th) if not honest]
+    """Решение 1.5 методиста: в топ-группе нет свежесозданного объявления, но есть недавно правленое — утверждать, что
+    креативы группы старые, нельзя: находки нет, E4 «unknown»."""
+    return [g["id"] for g, bs in _stale_candidates(ds, th)
+            if not any(_fresh(b, th) for b in bs) and any(edited_recently(b, ds, th) for b in bs)]
 
 
 @rule
 def stale_creatives(ds, th, ctx):
     out = []
-    for g, banners, honest in _stale_candidates(ds, th):
-        if not honest:   # все объявления правились недавно — дата смены креатива не видна, молчим
+    undetermined = set(stale_undetermined_groups(ds, th))
+    for g, banners in _stale_candidates(ds, th):
+        if g["id"] in undetermined:   # есть недавняя правка — дата смены креатива не видна, молчим
             continue
         _seen(ctx, "stale_creatives")
-        newest = min(b["age_days"] for b in honest)   # находка — по честно старым; правленые — «нет данных»
+        newest = min(creative_age_lower_bound(b, ds) for b in banners)   # «не менее N дней»
         if newest > th["creative_stale_red_days"]:
             level = "orange"
         elif newest > th["creative_stale_days"]:
             level = "white"
         else:
             continue
-        evidence = {"newest_creative_age_days": newest}
-        if len(honest) < len(banners):
-            evidence["edited_recently"] = len(banners) - len(honest)
         out.append(finding("stale_creatives", level, "group", g, "Креативы в топ-группе давно не обновлялись",
-                           evidence, "Обновить угол подачи: новый сценарий, боль или оффер (не только дизайн)"))
+                           {"newest_creative_age_days": newest},
+                           "Обновить угол подачи: новый сценарий, боль или оффер (не только дизайн)"))
     return out
 
 

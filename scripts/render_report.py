@@ -19,7 +19,7 @@ try:
     from scripts._workspace import resolve_workspace
     from scripts.diagnose import (_banners, bidding_label, load_thresholds, utm_unconfirmed_groups,
                                   utm_unconfirmed_reason, utm_unconfirmed_text)
-    from scripts.features import group_status_label, is_live_group, issue_label, ord_status_label
+    from scripts.features import group_status_label, is_live_group, issue_label, ord_status_label, plural
     from scripts.normalize import lists_no_access_call, zero_spend_head
     from scripts.raw_store import mark_recovered
 except ImportError:  # запуск напрямую
@@ -27,7 +27,7 @@ except ImportError:  # запуск напрямую
     from _workspace import resolve_workspace
     from diagnose import (_banners, bidding_label, load_thresholds, utm_unconfirmed_groups, utm_unconfirmed_reason,
                           utm_unconfirmed_text)
-    from features import group_status_label, is_live_group, issue_label, ord_status_label
+    from features import group_status_label, is_live_group, issue_label, ord_status_label, plural
     from normalize import lists_no_access_call, zero_spend_head
     from raw_store import mark_recovered
 
@@ -111,7 +111,7 @@ EVIDENCE_LABELS = {
     "age_span": "возрастной диапазон, лет", "shared_segments": "общие сегменты", "segment_size": "размер сегмента",
     "minimum": "минимум", "days_since_update": "дней без обновления", "missing": "не хватает форматов",
     "present": "есть форматы", "banners_with_content": "объявлений с контентом",
-    "newest_creative_age_days": "самому новому креативу, дней",
+    "newest_creative_age_days": "самому новому креативу",
     "edited_recently": "объявлений с недавней правкой (дата смены креатива не видна)", "banners": "объявления",
     "hours": "часов на модерации", "norm_hours": "норма, часов", "bounce_rate": "доля отказов", "visits": "визиты",
     "ratio": "визиты / клики", "metrika_goal_reaches": "достижений целей в Метрике", "vk_conversions": "конверсий в VK",
@@ -153,6 +153,8 @@ def evidence_value(key, v) -> str:
         return fmt_pct(v)
     if key in _SHARE_KEYS and isinstance(v, (int, float)):
         return f"{v * 100:.0f} %"
+    if key == "newest_creative_age_days" and isinstance(v, int):   # нижняя оценка: дата смены креатива не видна
+        return f"не менее {v} {plural(v, 'дня', 'дней', 'дней')}"
     if key == "ref_source":
         return REF_SOURCE_LABELS.get(v, "—")
     if key == "issues" and isinstance(v, list):
