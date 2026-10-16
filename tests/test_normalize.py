@@ -6,7 +6,7 @@ from scripts.normalize import (aggregate, build_dataset, check_sanity, main, mon
                                targeting_key)
 from scripts.raw_store import write_call
 
-P = {"date_from": "2026-09-01", "date_to": "2026-09-30", "metrics": "all"}
+P = {"date_from": "2026-09-01", "date_to": "2026-09-30", "metrics": "base"}
 
 
 def base(spent="0", shows=0, clicks=0, goals=0, ctr=None, vk_result=0):
@@ -265,7 +265,7 @@ def test_group_not_covered_anywhere_is_stats_missing(tmp_path):
 
 
 def test_summary_all_time_does_not_block_audit(tmp_path):
-    """statistics_summary игнорирует период (баг MCP): итоги берём из дней, расхождение — не код 3."""
+    """statistics_summary — только за всё время: итоги берём из дней, расхождение — не код 3."""
     raw = tmp_path / "raw"
     cabinet(raw, [_active(1)])
     _stat_call(raw, "vk_ads_statistics_summary", "campaigns", [1],

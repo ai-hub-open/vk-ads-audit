@@ -6,7 +6,7 @@
 ## Порядок сбора (путь A повторяет его руками)
 
 **Предполётка (до сбора):** `vk_ads_auth_check`, `vk_ads_account_info` (id пользователя), затем один вызов
-`vk_ads_statistics_day(entity="users", ids=<id пользователя>, date_from, date_to)`. Расход за период 0 — сказать
+`vk_ads_statistics_day(entity="users", ids=<id пользователя>, date_from, date_to, metrics=base)`. Расход за период 0 — сказать
 пользователю сразу и предложить другой период или кабинет; собирать нечего. Путь B делает это сам (код выхода 5), в
 `raw/` предполётка не пишется.
 
@@ -21,12 +21,12 @@
 | 2 | `vk_ads_campaigns_list` | `fields=id,name,status,objective,package_id,ad_plan_id,budget_limit,budget_limit_day,targetings,issues,created,updated,date_start,date_end,delivery,autobidding_mode,max_price,priced_goal,enable_utm,utm` | `vk_ads_campaigns_list__NNN.json` |
 | 3 | `vk_ads_banners_list` | `campaign_id=<группа>`, `fields=id,name,campaign_id,status,moderation_status,moderation_reasons,issues,delivery,textblocks,urls,content,created,updated,user_can_request_remoderation,call_to_action,ord_marker` | по файлу на группу |
 | 4 | `vk_ads_remarketing_segments_list`, `vk_ads_users_lists_list`, `vk_ads_remarketing_pixels_list` | — | по файлу |
-| 5 | `vk_ads_statistics_day` | `entity=campaigns`, `ids` ≤ 50 через запятую (все группы, кроме удалённых), `date_from`, `date_to`, `metrics=all` | по файлу на пачку |
-| 6 | `vk_ads_statistics_day` | `entity=banners`, `ids` объявлений (≤ 50 в пачке) | по файлу на пачку |
-| 7 | `vk_ads_statistics_summary` | `entity=campaigns`, как в шаге 5 — **необязательно**: охват и частота только у групп, созданных внутри периода | по файлу на пачку |
+| 5 | `vk_ads_statistics_day` | `entity=campaigns`, `ids` ≤ 50 через запятую (все группы, кроме удалённых), `date_from`, `date_to`, `metrics=base` | по файлу на пачку |
+| 6 | `vk_ads_statistics_day` | `entity=banners`, `ids` объявлений (≤ 50 в пачке), `date_from`, `date_to`, `metrics=base` | по файлу на пачку |
+| 7 | `vk_ads_statistics_summary` | `entity=campaigns`, `ids` как в шаге 5, `metrics=base,uniques`, **без `date_from` / `date_to`** — **необязательно**: охват и частота только у групп, созданных внутри периода | по файлу на пачку |
 
 Итоги периода (расход, показы, клики, конверсии) считаются **суммой строк `statistics_day`**: `statistics_summary`
-игнорирует `date_from` / `date_to` и отдаёт всё время (баг MCP, передан платформе). Поэтому и у групп, и у объявлений
+отдаёт итоги только за всё время, даты в неё не передаются (с `date_from` / `date_to` MCP отказывает). Поэтому и у групп, и у объявлений
 итоги берутся из дней (шаги 5 и 6); сводка нужна лишь ради охвата и частоты, и скрипты берут их только у групп, чья
 жизнь целиком в периоде (создана не раньше `date_from`, показы сводки совпадают с суммой дней). У остальных частота —
 «не определена», правила выгорания молчат, а в «Ограничениях» появляется строка. Старые `raw/` со сводками объявлений
@@ -56,7 +56,8 @@
 - Списки: `{"count"?, "items": [...], "offset"?}` — `count` бывает не у всех.
 - Статистика: `{"items": [{"id", "total": {"base": {...}, "uniques": {...}, ...}, "rows"?: [{"date", "base", ...}]}], "total": {...}}`;
   `rows` — только у `statistics_day`. Сущностей без показов в `items` может не быть — это нули.
-  `statistics_summary` игнорирует период (всё время), `statistics_day` его уважает; глубина дневной истории 366 дней.
+  `statistics_summary` — только за всё время (без дат), `statistics_day` — за период; глубина дневной истории 366 дней.
+  У `metrics=base` блока `uniques` нет: охват и частота дней — «не определены» (`None`), а не 0.
 - `base`: `shows`, `clicks`, `goals`, `spent` (строка, ₽), `cpm`/`cpc`/`cpa` (строки), `ctr`/`cr` — **уже проценты**
   (608 кликов на 117 469 показов → `ctr: 0.5176` = 0,52 %), `vk.{goals,result,cpa,cr,cpr}`.
 - `uniques`: `reach`, `frequency`.
@@ -71,8 +72,10 @@
 
 - `budget_limit` / `budget_limit_day` — рубли: 50000 в API = «50 000 ₽» в день в интерфейсе, 500 = 500 ₽.
 - `ctr` и `cr` в статистике — уже проценты; деньги в статистике — строки в рублях.
-- `vk_ads_statistics_summary` игнорирует `date_from` / `date_to` и отдаёт итоги за всё время (баг MCP, передан
-  платформе); `vk_ads_statistics_day` период уважает. Итоги периода — сумма дней (для объявлений — `entity=banners`).
+- `vk_ads_statistics_summary` отдаёт итоги только за всё время; с `date_from` / `date_to` MCP теперь отказывает понятной
+  ошибкой — даты в сводку не передаются. Период — только `vk_ads_statistics_day` (итог в `total`). Итоги периода — сумма
+  дней (для объявлений — `entity=banners`).
+- `metrics="base"` и `metrics="base,uniques"` принимаются (вместо тяжёлого `all`): дни — `base`, сводка — `base,uniques`.
 - Глубина дневной статистики 366 дней (окно включает сегодня). MCP отказывает сам до обращения к VK: «доступен период с
   2025-10-16 по 2026-10-16 … Укажите date_from не раньше 2025-10-16»; старый ответ VK — `400 WRONG_DATE: minimal allowed date
   is '2025-8-11'`. Скрипты разбирают дату из обоих текстов.

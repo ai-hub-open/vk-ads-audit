@@ -1,13 +1,13 @@
 """Синтетические кабинеты VK в формате raw/ (как отдаёт vk-ads-mcp 0.11.0, формы подтверждены живым прогоном 16.10.2026):
 бюджеты — рубли, ctr — проценты, итоги периода — сумма statistics_day (по группам и объявлениям), statistics_summary —
-за всё время (нужна только ради охвата и частоты групп, созданных внутри периода)."""
+без дат, за всё время (нужна только ради охвата и частоты групп, созданных внутри периода)."""
 from __future__ import annotations
 
 from pathlib import Path
 
 from scripts.raw_store import write_call
 
-P = {"date_from": "2026-09-01", "date_to": "2026-09-30", "metrics": "all"}
+P = {"date_from": "2026-09-01", "date_to": "2026-09-30", "metrics": "base"}
 DAYS = [f"2026-09-{d:02d}" for d in range(1, 31)]
 
 
@@ -59,7 +59,8 @@ def write_cabinet(raw: Path, groups, banners_by_group, per_day, pixels=1, segmen
             bdaily.append({"id": b["id"], "rows": [
                 {"date": d, **block(v[0] * share, int(v[1] * share), int(v[2] * share), int(v[3] * share),
                                     frequency=freq)} for d, v in zip(DAYS, days)]})
-    write_call(raw, "vk_ads_statistics_summary", {"entity": "campaigns", "ids": ",".join(map(str, live)), **P},
+    write_call(raw, "vk_ads_statistics_summary", {"entity": "campaigns", "ids": ",".join(map(str, live)),
+                                                  "metrics": "base,uniques"},          # сводка — без дат (всё время)
                {"items": summary})
     write_call(raw, "vk_ads_statistics_day", {"entity": "campaigns", "ids": ",".join(map(str, live)), **P},
                {"items": daily})

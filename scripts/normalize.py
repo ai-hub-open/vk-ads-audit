@@ -4,8 +4,9 @@ normalize.py — raw/ → dataset.json. Единицы приводятся ТО
 - бюджеты групп и кампаний приходят в рублях (подтверждено живым прогоном: 50000 = «50 000 ₽» в кабинете);
 - деньги статистики — строками в рублях;
 - CTR считаем сами из clicks/shows, значение VK (оно уже в процентах) храним для проверки единиц;
-- итоги периода — сумма строк statistics_day: statistics_summary игнорирует период и отдаёт всё время
-  (баг MCP), поэтому охват и частота берутся из сводки только для групп, чья жизнь целиком в периоде;
+- итоги периода — сумма строк statistics_day: statistics_summary отдаёт только всё время (даты в неё не передаются),
+  поэтому охват и частота берутся из сводки только для групп, чья жизнь целиком в периоде;
+- metrics=base у дней: блока uniques нет — охват и частота «не определены» (None), а не 0;
 - конверсии: base.goals, для целей из CONVERSION_SOURCE — base.vk.result.
 Проверка здравого смысла (check_sanity) останавливает аудит на кривых числах.
 
@@ -86,7 +87,8 @@ def stats_from(block, objective) -> dict:
     return {"spent": spent, "shows": shows, "clicks": clicks, "conversions": conv,
             **_ratios(spent, shows, clicks, conv),
             "vk_ctr_pct": None if b.get("ctr") in (None, "") else round(float(b["ctr"]), 4),   # у VK уже проценты
-            "reach": int(u.get("reach") or 0), "frequency": float(u.get("frequency") or 0) or None}
+            "reach": None if u.get("reach") in (None, "") else int(u["reach"]),   # нет uniques — нет данных, не 0
+            "frequency": float(u.get("frequency") or 0) or None}
 
 
 def aggregate(rows: list) -> dict:
@@ -95,7 +97,7 @@ def aggregate(rows: list) -> dict:
     clicks = sum(r["clicks"] for r in rows)
     conv = sum(r["conversions"] for r in rows)
     return {"spent": spent, "shows": shows, "clicks": clicks, "conversions": conv,
-            **_ratios(spent, shows, clicks, conv), "vk_ctr_pct": None, "reach": 0, "frequency": None}
+            **_ratios(spent, shows, clicks, conv), "vk_ctr_pct": None, "reach": None, "frequency": None}
 
 
 def _canon(v):

@@ -3,7 +3,8 @@ collect.py — путь B: скрипт сам собирает кабинет �
 
 Предполётка (один вызов): расход пользователя за период по дням; нулевой расход — сбор не начинается.
 Опись (кампании, группы, объявления по группам, сегменты, списки, пиксели) и
-статистика (по дням по группам и по объявлениям; сводка по группам — только ради охвата и частоты).
+статистика (по дням по группам и по объявлениям; сводка по группам — за всё время, без дат, только ради
+охвата и частоты).
 Только инструменты из белого списка mcp_client. Частичный сбой не останавливает
 сбор — он попадает в collect_log.json, а оттуда в ограничения отчёта.
 
@@ -54,7 +55,9 @@ STATS_CHUNK = 50
 HISTORY_DAYS = 366          # глубина дневной статистики VK: MCP отказывает сам, VK — 400 WRONG_DATE (минимальная дата в тексте)
 _MIN_DATE_RES = (re.compile(r"minimal allowed date is '(\d{4})-(\d{1,2})-(\d{1,2})'", re.I),   # VK: WRONG_DATE
                  re.compile(r"доступен период с (\d{4})-(\d{1,2})-(\d{1,2})"))                    # отказ самого MCP
-METRICS = "all"
+# Подтверждено 16.10.2026: «base» и «base,uniques» принимаются (вместо тяжёлого «all»). Дням охват не нужен.
+METRICS_DAY = "base"
+METRICS_SUMMARY = "base,uniques"   # охват и частота — только в uniques
 LISTS = ("vk_ads_remarketing_segments_list", "vk_ads_users_lists_list", "vk_ads_remarketing_pixels_list")
 MODES = ("deep", "quick")
 
@@ -239,7 +242,7 @@ def collect(client, raw_dir: Path, date_from: str, date_to: str, mode: str = "de
            "errors": 0, "critical": False, "no_spend": False}
     out = raw_dir.parent / "collect_log.json"
     try:
-        period = {"date_from": date_from, "date_to": date_to, "metrics": METRICS}
+        period = {"date_from": date_from, "date_to": date_to, "metrics": METRICS_DAY}
         uid = _user_id(c.probe("vk_ads_account_info", {}))
         if uid is not None:   # предполётка: нулевой расход за период — собирать нечего
             resp = c.probe("vk_ads_statistics_day", {"entity": "users", "ids": str(uid), **period})
@@ -276,8 +279,8 @@ def collect(client, raw_dir: Path, date_from: str, date_to: str, mode: str = "de
 
         for chunk in _chunks(measured, STATS_CHUNK):
             ids = ",".join(map(str, chunk))
-            if mode == "deep":   # сводка отдаёт всё время (баг MCP): нужна только ради охвата и частоты новых групп
-                c.call("vk_ads_statistics_summary", {"entity": "campaigns", "ids": ids, **period})
+            if mode == "deep":   # сводка — только за всё время, с датами MCP отказывает: нужна ради охвата и частоты
+                c.call("vk_ads_statistics_summary", {"entity": "campaigns", "ids": ids, "metrics": METRICS_SUMMARY})
             c.call("vk_ads_statistics_day", {"entity": "campaigns", "ids": ids, **period})
         for chunk in _chunks(banner_ids, STATS_CHUNK):   # итоги объявлений — сумма дней, как у групп
             c.call("vk_ads_statistics_day", {"entity": "banners", "ids": ",".join(map(str, chunk)), **period})
