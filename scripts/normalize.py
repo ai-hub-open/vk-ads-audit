@@ -29,7 +29,7 @@ try:
                                   SEGMENT_RELATION_KEYS, banner_text, content_features, first_known, is_lal,
                                   is_live_group, layer_of, observed_keys, parse_dt, targeting_features,
                                   url_strings, users_list_ids)
-    from scripts.raw_store import items_of, read_calls
+    from scripts.raw_store import items_of, mark_recovered, read_calls
 except ImportError:  # запуск напрямую
     from _console import setup_console
     from _workspace import resolve_workspace
@@ -37,7 +37,7 @@ except ImportError:  # запуск напрямую
                           SEGMENT_RELATION_KEYS, banner_text, content_features, first_known, is_lal,
                           is_live_group, layer_of, observed_keys, parse_dt, targeting_features,
                           url_strings, users_list_ids)
-    from raw_store import items_of, read_calls
+    from raw_store import items_of, mark_recovered, read_calls
 
 CONVERSION_SOURCE = {"leadads": "vk.result", "socialengagement": "vk.result"}
 NOT_TARGETING = ("fulltime",)
@@ -284,7 +284,7 @@ def _lifetime_fits(g: dict, d_from: date, period_stats: dict, summary_stats: dic
 
 def _no_access_to_lists(collect_log) -> bool:
     return any(c.get("tool") == "vk_ads_users_lists_list" and not c.get("ok", True) and c.get("no_access")
-               for c in (collect_log or {}).get("calls", []))
+               and not c.get("recovered") for c in (mark_recovered(collect_log) or {}).get("calls", []))
 
 
 def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, path: str = "B",
@@ -571,7 +571,7 @@ def _read_collect_log(ws: Path):
         data = json.loads((ws / "collect_log.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    return data if isinstance(data, dict) else None
+    return mark_recovered(data, ws / "raw") if isinstance(data, dict) else None
 
 
 def main(argv=None) -> int:

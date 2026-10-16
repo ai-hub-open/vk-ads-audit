@@ -95,3 +95,68 @@ def test_docs_say_summary_is_all_time_and_dates_not_passed():
         assert "баг MCP" not in text and "игнорирует" not in text
     assert "даты не передавай" in SKILL and "только за всё время" in tools_doc
     assert "metrics=base,uniques" in tools_doc and "metrics=base`" in tools_doc
+
+
+# ---- 4. неудача, после которой тот же вызов прошёл, — не ограничение ----
+
+def _fail(tool, args, err="HTTP 502"):
+    return {"tool": tool, "arguments": args, "ok": False, "error": f"{tool}: {err}"}
+
+
+def _not_got(lines, tool):
+    return [x for x in lines if x.startswith(f"Не удалось получить {tool}")]
+
+
+def test_failure_followed_by_same_successful_call_in_log_is_hidden(tmp_path):
+    from scripts.render_report import limitations
+    raw = tmp_path / "raw"
+    cabinet(raw, [_active(1)], daily={1: day_rows(2)})
+    args = {"entity": "campaigns", "ids": "1", "date_from": D[0], "date_to": D[1], "metrics": "base"}
+    log = {"calls": [_fail("vk_ads_statistics_day", args),
+                     {"tool": "vk_ads_statistics_day", "arguments": dict(args), "ok": True, "error": None}]}
+    assert _not_got(limitations(build_dataset(raw, *D), log), "vk_ads_statistics_day") == []
+
+
+def test_failure_recovered_by_raw_file_is_hidden_and_other_args_stay(tmp_path):
+    from scripts.raw_store import mark_recovered, write_call
+    from scripts.render_report import limitations
+    raw = tmp_path / "raw"
+    cabinet(raw, [_active(1)], daily={1: day_rows(2)})          # список групп лежит в raw/ с paginated=True
+    write_call(raw, "vk_ads_banners_list", {"campaign_id": 1, "fields": "id,name"}, {"items": []})
+    log = {"calls": [_fail("vk_ads_campaigns_list", {}),                                    # путь A: повтор удался
+                     _fail("vk_ads_banners_list", {"campaign_id": "1", "fields": "id,name"}),  # тот же id строкой
+                     _fail("vk_ads_banners_list", {"campaign_id": 2, "fields": "id,name"})]}   # другой вызов — сбой
+    marked = mark_recovered(log, raw)
+    assert [c.get("recovered", False) for c in marked["calls"]] == [True, True, False]
+    lines = limitations(build_dataset(raw, *D), marked)
+    assert _not_got(lines, "vk_ads_campaigns_list") == []
+    assert len(_not_got(lines, "vk_ads_banners_list")) == 1
+    assert log["calls"][0].get("recovered") is None                 # исходный журнал не меняется
+
+
+def test_render_cli_reads_raw_to_hide_recovered_failures(tmp_path):
+    import json
+    from scripts.render_report import main as render_main
+    ws = tmp_path / "ws"
+    cabinet(ws / "raw", [_active(1)], daily={1: day_rows(2)})
+    ds = build_dataset(ws / "raw", *D)
+    (ws / "dataset.json").write_text(json.dumps(ds, ensure_ascii=False), encoding="utf-8")
+    (ws / "findings.json").write_text(json.dumps(res(ds), ensure_ascii=False), encoding="utf-8")
+    (ws / "collect_log.json").write_text(json.dumps({"calls": [_fail("vk_ads_ad_plans_list", {})]}),
+                                         encoding="utf-8")
+    assert render_main(["--workspace", str(ws), "--slug", "t"]) == 0
+    assert "Не удалось получить vk_ads_ad_plans_list" not in (ws / "АУДИТ_t.html").read_text(encoding="utf-8")
+
+
+def test_no_access_then_success_is_not_no_access(tmp_path):
+    from scripts.normalize import main as norm_main
+    import json
+    from scripts.raw_store import write_call
+    ws = tmp_path / "ws"
+    cabinet(ws / "raw", [_active(1)], daily={1: day_rows(2)})
+    write_call(ws / "raw", "vk_ads_users_lists_list", {}, {"items": []})
+    (ws / "collect_log.json").write_text(json.dumps({"calls": [
+        {**_fail("vk_ads_users_lists_list", {}, "429"), "no_access": True}]}), encoding="utf-8")
+    assert norm_main(["--workspace", str(ws), "--date-from", D[0], "--date-to", D[1]]) == 0
+    ds = json.loads((ws / "dataset.json").read_text(encoding="utf-8"))
+    assert ds["coverage"]["users_lists_no_access"] is False

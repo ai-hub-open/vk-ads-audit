@@ -16,9 +16,11 @@ from html import escape
 try:
     from scripts._console import setup_console
     from scripts._workspace import resolve_workspace
+    from scripts.raw_store import mark_recovered
 except ImportError:  # запуск напрямую
     from _console import setup_console
     from _workspace import resolve_workspace
+    from raw_store import mark_recovered
 
 LEVELS = [("red", "🔴 Срезать слив"), ("orange", "🟠 Починить"), ("green", "🟢 Масштабировать"),
           ("white", "⚪ Гигиена")]
@@ -83,11 +85,12 @@ def limitations(ds: dict, collect_log=None, checklist=None) -> list:
     elif not cov.get("metrika_utm", True):
         lines.append("Метрика без UTM-разметки: склейка только на уровне всего трафика VK, "
                      "правила по группам не применялись.")
+    collect_log = mark_recovered(collect_log)   # повтор того же вызова прошёл — сбой не ограничение
     calls = (collect_log or {}).get("calls", [])
     for c in calls:
-        if not c.get("ok") and not c.get("superseded") and not c.get("preflight") and not _lists_no_access(c):
+        if not c.get("ok") and not c.get("superseded") and not c.get("recovered") and not c.get("preflight")                 and not _lists_no_access(c):
             lines.append(f"Не удалось получить {c['tool']}: {c.get('error')}")
-    if any(_lists_no_access(c) for c in calls) and not any(
+    if any(_lists_no_access(c) and not c.get("recovered") for c in calls) and not any(
             "Нет доступа к базам клиентов" in n for n in ds.get("notes") or []):
         lines.append("Нет доступа к базам клиентов: проверки, зависящие от баз, не выполнялись.")
     if any(c.get("superseded") for c in calls):
@@ -200,6 +203,7 @@ def main(argv=None) -> int:
     fs = json.loads((ws / "findings.json").read_text(encoding="utf-8"))
     log_path = ws / "collect_log.json"
     log = json.loads(log_path.read_text(encoding="utf-8")) if log_path.is_file() else None
+    log = mark_recovered(log, ws / "raw")   # путь A: удавшийся повтор лежит файлом в raw/
     out = ws / f"АУДИТ_{args.slug}.html"
     out.write_text(render(ds, fs, log, title=args.slug), encoding="utf-8")
     print(f"✓ {out}")
