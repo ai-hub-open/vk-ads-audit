@@ -21,11 +21,11 @@ from pathlib import Path
 try:
     from scripts._console import setup_console
     from scripts._workspace import SKILL_ROOT, resolve_workspace
-    from scripts.features import is_live_group, parse_dt, plural
+    from scripts.features import is_active_group, is_live_group, issue_label, parse_dt, plural
 except ImportError:  # запуск напрямую
     from _console import setup_console
     from _workspace import SKILL_ROOT, resolve_workspace
-    from features import is_live_group, parse_dt, plural
+    from features import is_active_group, is_live_group, issue_label, parse_dt, plural
 
 LEVEL_ORDER = {"red": 0, "orange": 1, "green": 2, "white": 3}
 DEFAULT_THRESHOLDS = SKILL_ROOT / "references" / "thresholds.json"
@@ -58,6 +58,10 @@ def utm_unconfirmed_text(n: int) -> str:
     return r[0].upper() + r[1:] + "."
 
 
+def _rub_text(v) -> str:
+    return f"{v:,.0f} ₽".replace(",", " ")
+
+
 def rule(fn):
     RULES.append(fn)
     return fn
@@ -86,7 +90,8 @@ def confidence(clicks: int, th) -> str:
 
 
 def _active(g, th) -> bool:
-    return g["status"] in th["active_statuses"]
+    """Группа реально откручивает: активна и её кампания не остановлена (features.is_active_group)."""
+    return is_active_group(g, th["active_statuses"])
 
 
 def _live(ds):
@@ -137,28 +142,59 @@ def _early(ds, g, th) -> bool:
     return _run_days(ds, g) < th["min_run_days"]
 
 
+def _banner_old_enough(b, th) -> bool:
+    if b.get("run_days") is not None:
+        return b["run_days"] >= th["min_run_days"]
+    return b.get("age_days") is None or b["age_days"] >= th["min_run_days"]
+
+
 def _perf_entities(ds, th) -> list:
-    """Объявления (если собраны и старше 7 дней) и группы (если по ним нет объявлений и работают 7+ дней)."""
+    """Объявления (если собраны и показывались 7+ дней периода) и группы (если по ним нет объявлений и работают
+    7+ дней). Ревью: объявление судим по дням показов в периоде (run_days), а не по дате создания; старый dataset
+    без run_days — по возрасту."""
     live = {g["id"]: g for g in _measured(ds)}
     covered = _banner_groups(ds)
     banners = [b for b in ds["banners"] if b["stats"] and b["status"] != "deleted" and b["group_id"] in live
                and b["group_id"] in covered]
     banner_level = {b["group_id"] for b in banners}
-    out = [("banner", b, b["stats"]) for b in banners
-           if b.get("age_days") is None or b["age_days"] >= th["min_run_days"]]
+    out = [("banner", b, b["stats"]) for b in banners if _banner_old_enough(b, th)]
     out += [("group", g, g["stats"]) for g in live.values()
             if g["id"] not in banner_level and not _early(ds, g, th)]
     return out
 
 
-def reference_cpa(ds, th):
+_ALL = object()
+
+
+def reference_cpa(ds, th, objective=_ALL):
+    """Опорный CPA: целевой клиента или медиана CPA групп с ≥ min_conversions_for_cpa конверсиями. Ревью: группы моложе
+    7 дней в медиану не входят (решение 5), медиана — внутри одной цели (objective): CPA сайта и лид-форм не смешиваем."""
     if ds.get("target_cpa"):
         return float(ds["target_cpa"]), "target"
     cpas = [g["stats"]["cpa"] for g in _measured(ds)
-            if g["stats"]["cpa"] is not None and g["stats"]["conversions"] >= th["min_conversions_for_cpa"]]
+            if (objective is _ALL or g.get("objective") == objective) and not _early(ds, g, th)
+            and g["stats"]["cpa"] is not None and g["stats"]["conversions"] >= th["min_conversions_for_cpa"]]
     if cpas:
         return round(float(statistics.median(cpas)), 2), "median"
     return None, "none"
+
+
+def reference_by_objective(ds, th) -> dict:
+    """{цель: опорный CPA} для целей живых групп, где он есть."""
+    out = {}
+    for obj in sorted({g.get("objective") for g in _measured(ds)}, key=str):
+        ref, _ = reference_cpa(ds, th, obj)
+        if ref is not None:
+            out[obj] = ref
+    return out
+
+
+def _ref(ctx, g):
+    """(опорный CPA, источник) для цели группы."""
+    if ctx["ref_source"] == "target":
+        return ctx["ref_cpa"], "target"
+    ref = ctx["ref_by_obj"].get(g.get("objective"))
+    return (ref, "median") if ref is not None else (None, "none")
 
 
 def _banners_of(ds, g):
@@ -172,6 +208,14 @@ def _feat(g) -> dict:
 
 def _layer(g):
     return g.get("layer")  # None — слой не определён (targetings не получены)
+
+
+def _guessed(g) -> bool:
+    """Слой по догадке: тип сегмента по связям (relations) не определён — «не LAL — тёплый», низкая надёжность."""
+    return bool(g.get("layer_guessed")) and g.get("layer") is not None
+
+
+GUESSED_REASON = ("VK не сообщил тип части сегментов — слой (тёплый, похожие, холодный) определён по догадке")
 
 
 def _active_banners(ds, g, th) -> list:
@@ -236,7 +280,8 @@ def blocking_issues(ds, th, ctx):
             _seen(ctx, "blocking_issues")
         if _active(g, th) and codes:
             out.append(finding("blocking_issues", "orange", "group", g, "VK сообщает, почему группа не крутится",
-                               {"issues": codes}, "Устранить причину: " + ", ".join(codes)))
+                               {"issues": codes},
+                               "Устранить причину: " + ", ".join(issue_label(c) for c in codes)))
     return out
 
 
@@ -293,12 +338,12 @@ def low_budget(ds, th, ctx):
             out.append(finding("low_budget", "orange", "group", g, "Дневной бюджет ниже минимума VK",
                                {"budget_day_rub": b, "minimum_rub": th["min_daily_budget_rub"]},
                                f"Поднять дневной бюджет до {th['min_daily_budget_rub']} ₽ и выше"))
-        elif _is_auto(g, th) and ctx["ref_cpa"] is not None and \
-                b < ctx["ref_cpa"] * th["learning_budget_cpa_multiplier"]:
-            need = ctx["ref_cpa"] * th["learning_budget_cpa_multiplier"]
+        elif _is_auto(g, th) and _ref(ctx, g)[0] is not None and \
+                b < _ref(ctx, g)[0] * th["learning_budget_cpa_multiplier"]:
+            need = _ref(ctx, g)[0] * th["learning_budget_cpa_multiplier"]
             out.append(finding("low_budget", "orange", "group", g,
                                "Бюджета не хватает на обучение автостратегии",
-                               {"budget_day_rub": b, "needed_rub": need, "ref_source": ctx["ref_source"]},
+                               {"budget_day_rub": b, "needed_rub": need, "ref_source": _ref(ctx, g)[1]},
                                f"Дневной бюджет не ниже {need:.0f} ₽ (≥ {th['learning_budget_cpa_multiplier']} × CPA)"))
         elif b < th["recommended_daily_budget_rub"]:
             out.append(finding("low_budget", "white", "group", g, "Дневной бюджет на нижней границе",
@@ -447,10 +492,21 @@ def layer_missing(ds, th, ctx):
     if not missing:
         return []
     names = {"lal": "похожие (LAL)", "cold": "холодный"}
-    return [finding("layer_missing", "white", "account", ACCOUNT,
-                    "Не хватает слоя аудиторий: " + ", ".join(names[m] for m in missing),
-                    {"missing_layers": missing},
-                    "Добавить слой: LAL на клиентов и лиды или холодный тест на интересах и контексте")]
+    action = "Добавить слой: LAL на клиентов и лиды или холодный тест на интересах и контексте"
+    guessed = any(_guessed(g) for g in live)
+    if not ("cold" in missing and guessed):
+        return [finding("layer_missing", "white", "account", ACCOUNT,
+                        "Не хватает слоя аудиторий: " + ", ".join(names[m] for m in missing),
+                        {"missing_layers": missing}, action)]
+    # Ревью: LAL опознаётся по имени и от догадки про слои не зависит — его отсутствие твёрдое; отсутствие холодного
+    # при слоях по догадке («тёплая» группа может быть холодной) — отдельная условная карточка.
+    out = [finding("layer_missing", "white", "account", ACCOUNT, "Не хватает слоя аудиторий: " + names["lal"],
+                   {"missing_layers": ["lal"]}, action)] if "lal" in missing else []
+    f = finding("layer_missing", "white", "account", ACCOUNT,
+                "Не хватает слоя аудиторий: холодный (слои части групп определены по догадке)",
+                {"missing_layers": ["cold"]}, action, conf="low")
+    f["tentative"] = True
+    return out + [f]
 
 
 @rule
@@ -472,24 +528,41 @@ def layer_share(ds, th, ctx):
         actual = {k: by[k] / total for k in target}
     if all(abs(actual[k] - target[k]) <= th["layer_share_tolerance"] for k in target):
         return []
-    return [finding("layer_share", "white", "account", ACCOUNT, "Доли бюджета по слоям далеки от рекомендованных",
-                    {"actual": {k: round(v, 3) for k, v in actual.items()}, "target": target,
-                     "month_spend_rub": round(month, 2)},
-                    "Перераспределить бюджет между тёплым, LAL и холодным слоями")]
+    guessed = sum(g["stats"]["spent"] for g in gs if _guessed(g))
+    f = finding("layer_share", "white", "account", ACCOUNT, "Доли бюджета по слоям далеки от рекомендованных",
+                {"actual": {k: round(v, 3) for k, v in actual.items()}, "target": target,
+                 "month_spend_rub": round(month, 2)},
+                "Перераспределить бюджет между тёплым, LAL и холодным слоями")
+    if guessed:   # как stale_list без связей: карточка низкой надёжности, B3 — «нет данных», а не ❌
+        f.update(confidence="low", tentative=True)
+        f["title"] += " (слои части групп определены по догадке)"
+        f["evidence"]["guessed_share"] = round(guessed / total, 3)
+    return [f]
 
 
 @rule
 def mixed_plan(ds, th, ctx):
     by_plan = defaultdict(set)
+    guessed = set()
     for g in _live(ds):
         if _active(g, th) and g.get("ad_plan_id") is not None and _layer(g) is not None:
             by_plan[g["ad_plan_id"]].add(_layer(g))
+            if _guessed(g):
+                guessed.add(g["ad_plan_id"])
     plans = {p["id"]: p for p in ds["plans"]}
     _seen(ctx, "mixed_plan", len(by_plan))
-    return [finding("mixed_plan", "white", "plan", plans.get(pid, {"id": pid, "name": ""}),
+    out = []
+    for pid, layers in by_plan.items():
+        if len(layers) < 2:
+            continue
+        f = finding("mixed_plan", "white", "plan", plans.get(pid, {"id": pid, "name": ""}),
                     "В одной кампании смешаны разные слои аудиторий", {"layers": sorted(layers)},
                     "Разнести: один сегмент — одна кампания")
-            for pid, layers in by_plan.items() if len(layers) > 1]
+        if pid in guessed:
+            f.update(confidence="low", tentative=True)
+            f["title"] += " (слои части групп определены по догадке)"
+        out.append(f)
+    return out
 
 
 @rule
@@ -642,15 +715,22 @@ def creative_overlap(ds, th, ctx):
     return out
 
 
+def used_lal_segments(ds) -> list:
+    """LAL-сегменты, которые стоят в таргетинге (или исключениях) хотя бы одной живой группы: качество базы LAL
+    важно, только если по нему крутится реклама."""
+    used = _segments_of(_live(ds))
+    return [s for s in ds["segments"] if s.get("lal") and s["id"] in used]
+
+
 @rule
 def lal_small_source(ds, th, ctx):
-    _seen(ctx, "lal_small_source", sum(1 for s in ds["segments"] if s.get("lal") and isinstance(s.get("size"), int)))
+    lal = [s for s in used_lal_segments(ds) if isinstance(s.get("size"), int)]
+    _seen(ctx, "lal_small_source", len(lal))
     return [finding("lal_small_source", "orange", "segment", s, "LAL собран на слишком маленькой базе",
                     {"segment_size": s["size"], "minimum": th["lal_min_source"]},
                     f"Проверить исходную базу LAL: нужна база от {th['lal_min_source']} целевых действий",
                     conf="low")
-            for s in ds["segments"] if s.get("lal") and isinstance(s.get("size"), int)
-            and s["size"] < th["lal_min_source"]]
+            for s in lal if s["size"] < th["lal_min_source"]]
 
 
 def _referenced_list_ids(ds, th):
@@ -680,10 +760,12 @@ def stale_list(ds, th, ctx):
             title = "База давно не обновлялась"
             if referenced is None:
                 title += " (если база используется в таргетинге)"
-            out.append(finding("stale_list", "white", "list", lst, title,
-                               {"days_since_update": (end - d).days},
-                               "Обновить базу или перейти на динамический ретаргетинг",
-                               conf="high" if referenced is not None else "low"))
+            f = finding("stale_list", "white", "list", lst, title, {"days_since_update": (end - d).days},
+                        "Обновить базу или перейти на динамический ретаргетинг",
+                        conf="high" if referenced is not None else "low")
+            if referenced is None:   # условная карточка: используется ли база, не известно — ❌ в C14 не ставит
+                f["tentative"] = True
+            out.append(f)
     return out
 
 
@@ -775,16 +857,54 @@ def _top_groups(ds, th) -> list:
     return out
 
 
-@rule
-def stale_creatives(ds, th, ctx):
+def edited_recently(b, ds, th) -> bool:
+    """Объявление создано давно, но правилось внутри порога свежести (или после конца периода): VK не отдаёт дату
+    смены креатива, поэтому «креатив старый» по нему утверждать нельзя (третий живой прогон)."""
+    u = _date(b.get("updated"))
+    end = date.fromisoformat(ds["period"]["to"])
+    return (u is not None and b.get("age_days") is not None and b["age_days"] > th["creative_stale_days"]
+            and (end - u).days <= th["creative_stale_days"])
+
+
+def creative_age_lower_bound(b, ds):
+    """Нижняя оценка возраста креатива: min(дней с создания, дней с последней правки) — VK не отдаёт дату смены
+    креатива, правка могла её сменить (ревью: правка 20 дней назад не даёт «400 дней»)."""
+    u = _date(b.get("updated"))
+    if u is None:
+        return b["age_days"]
+    return max(min(b["age_days"], (date.fromisoformat(ds["period"]["to"]) - u).days), 0)
+
+
+def _stale_candidates(ds, th):
+    """(группа, активные объявления) для топ-групп с собранными объявлениями и известным возрастом каждого."""
     covered = _banner_groups(ds)
-    out = []
     for g in _top_groups(ds, th):
         banners = _active_banners(ds, g, th)
         if g["id"] not in covered or not banners or any(b.get("age_days") is None for b in banners):
             continue   # возраст одного из объявлений не известен — свежесть группы не оценить
+        yield g, banners
+
+
+def _fresh(b, th) -> bool:
+    return b["age_days"] <= th["creative_stale_days"]
+
+
+def stale_undetermined_groups(ds, th) -> list:
+    """Решение 1.5 методиста: в топ-группе нет свежесозданного объявления, но есть недавно правленое — утверждать, что
+    креативы группы старые, нельзя: находки нет, E4 «unknown»."""
+    return [g["id"] for g, bs in _stale_candidates(ds, th)
+            if not any(_fresh(b, th) for b in bs) and any(edited_recently(b, ds, th) for b in bs)]
+
+
+@rule
+def stale_creatives(ds, th, ctx):
+    out = []
+    undetermined = set(stale_undetermined_groups(ds, th))
+    for g, banners in _stale_candidates(ds, th):
+        if g["id"] in undetermined:   # есть недавняя правка — дата смены креатива не видна, молчим
+            continue
         _seen(ctx, "stale_creatives")
-        newest = min(b["age_days"] for b in banners)
+        newest = min(creative_age_lower_bound(b, ds) for b in banners)   # «не менее N дней»
         if newest > th["creative_stale_red_days"]:
             level = "orange"
         elif newest > th["creative_stale_days"]:
@@ -851,16 +971,18 @@ def moderation_stuck(ds, th, ctx):
 
 @rule
 def spend_no_conversions(ds, th, ctx):
-    ref = ctx["ref_cpa"]
-    limit = ref * th["no_conv_spend_cpa_multiplier"] if ref else th["no_conv_min_spend_rub"]
     out = []
     for g in _measured(ds):
+        if _early(ds, g, th):   # решение 5: результат группы моложе 7 дней не судим
+            continue
+        ref, source = _ref(ctx, g)
+        limit = ref * th["no_conv_spend_cpa_multiplier"] if ref else th["no_conv_min_spend_rub"]
         s = g["stats"]
         _seen(ctx, "spend_no_conversions")
         if s["conversions"] == 0 and s["spent"] >= limit:
             out.append(finding("spend_no_conversions", "red", "group", g, "Расход без конверсий",
                                {"spent": s["spent"], "clicks": s["clicks"], "limit_rub": round(limit, 2),
-                                "ref_source": ctx["ref_source"]},
+                                "ref_source": source},
                                "Остановить или пересобрать: аудитория, креатив, посадочная, событие пикселя",
                                effect_rub=s["spent"], conf=confidence(s["clicks"], th)))
     return out
@@ -868,18 +990,18 @@ def spend_no_conversions(ds, th, ctx):
 
 @rule
 def cpa_above_target(ds, th, ctx):
-    ref = ctx["ref_cpa"]
-    if not ref:
-        return []
     out = []
     for g in _measured(ds):
+        ref, source = _ref(ctx, g)
+        if not ref or _early(ds, g, th):   # опорного CPA для цели группы нет или группа моложе 7 дней
+            continue
         s = g["stats"]
         if s["conversions"] >= th["min_conversions_for_cpa"]:
             _seen(ctx, "cpa_above_target")
         if s["conversions"] >= th["min_conversions_for_cpa"] and s["cpa"] > ref * th["cpa_over_ratio"]:
             over = s["spent"] - s["conversions"] * ref
             out.append(finding("cpa_above_target", "red", "group", g, "CPA заметно выше опорного",
-                               {"cpa": s["cpa"], "ref_cpa": ref, "ref_source": ctx["ref_source"],
+                               {"cpa": s["cpa"], "ref_cpa": ref, "ref_source": source,
                                 "conversions": s["conversions"]},
                                "Сузить или сменить аудиторию, заменить слабые креативы, снизить ставку",
                                effect_rub=over, conf=confidence(s["clicks"], th)))
@@ -1021,20 +1143,31 @@ def spend_concentration(ds, th, ctx):
 
 @rule
 def scale_leader(ds, th, ctx):
-    ref = ctx["ref_cpa"]
-    if not ref:
-        return []
     out = []
     for g in _measured(ds):
         s, b = g["stats"], g["budget_day_rub"]
-        if not _active(g, th) or not b or not g["daily"] or s["conversions"] < th["min_conversions_for_cpa"]:
+        ref = _ref(ctx, g)[0]
+        if not ref or not _active(g, th) or not b or not g["daily"] or s["conversions"] < th["min_conversions_for_cpa"]:
+            continue
+        if _early(ds, g, th):   # решение 5: лидера моложе 7 дней не масштабируем
             continue
         spend_days = [r["spent"] for r in g["daily"] if r["spent"] > 0]
         if not spend_days:
             continue
         _seen(ctx, "scale_leader")
         avg = sum(spend_days) / len(spend_days)
-        if s["cpa"] <= ref * th["leader_cpa_ratio"] and avg >= b * th["leader_budget_use"]:
+        if s["cpa"] > ref * th["leader_cpa_ratio"] or avg < b * th["leader_budget_use"]:
+            continue
+        if g.get("changed_after_period") and b < avg:
+            # Третий живой прогон: бюджет урезали в день сбора — «+50 %» и «упирается» были бы советом по чужим цифрам.
+            out.append(finding("leader_budget_changed", "white", "group", g,
+                               f"Бюджет менялся после периода: сейчас {_rub_text(b)} при расходе {_rub_text(avg)} "
+                               "в день — проверьте актуальность",
+                               {"cpa": s["cpa"], "ref_cpa": ref, "avg_daily_spent": round(avg, 2),
+                                "budget_day_rub": b},
+                               "Сверить текущий дневной бюджет с планом; решение о масштабировании — после сверки",
+                               conf=confidence(s["clicks"], th)))
+        else:
             out.append(finding("scale_leader", "green", "group", g, "Лидер упирается в бюджет",
                                {"cpa": s["cpa"], "ref_cpa": ref, "avg_daily_spent": round(avg, 2),
                                 "budget_day_rub": b},
@@ -1047,7 +1180,8 @@ def scale_leader(ds, th, ctx):
 # ---------- метрика ----------
 
 def _with_metrika(ds, th):
-    return [g for g in _measured(ds) if _active(g, th) and g.get("metrika")]
+    # решение 5: группы моложе 7 дней правила Метрики не судят
+    return [g for g in _measured(ds) if _active(g, th) and g.get("metrika") and not _early(ds, g, th)]
 
 
 @rule
@@ -1134,7 +1268,10 @@ def funnel_status(ds: dict, th: dict) -> dict:
             if not layers_known:
                 out[key] = ("unknown", "слои аудиторий не определены — таргетинги не получены")
                 continue
-            ok = any(_layer(g) == "warm" for g in live)
+            ok = any(_layer(g) == "warm" and not _guessed(g) for g in live)
+            if not ok and any(_layer(g) == "warm" for g in live):   # тёплый только по догадке — не ✅ и не ❌
+                out[key] = ("unknown", "ретаргетинг не подтверждён: " + GUESSED_REASON)
+                continue
         elif key == "senler":   # единственная воронка по объявлениям; остальные — по цели и слоям групп
             if not ds["coverage"].get("banners"):
                 out[key] = ("unknown", "объявления не собирались")
@@ -1206,14 +1343,36 @@ def funnel_potential_findings(ds: dict, th: dict, answers: dict | None) -> list:
 # ---------- запуск ----------
 
 def diagnose(ds: dict, th: dict, answers: dict | None = None) -> dict:
-    ref, source = reference_cpa(ds, th)
-    ctx = {"ref_cpa": ref, "ref_source": source, "evaluated": defaultdict(int)}
+    by_obj = {} if ds.get("target_cpa") else reference_by_objective(ds, th)
+    if ds.get("target_cpa"):
+        ref, source = reference_cpa(ds, th)
+    elif len(by_obj) == 1:
+        ref, source = next(iter(by_obj.values())), "median"
+    else:   # нет опорного или несколько целей — опорный у каждой цели свой (ref_by_objective)
+        ref, source = None, "median" if by_obj else "none"
+    ctx = {"ref_cpa": ref, "ref_source": source, "ref_by_obj": by_obj, "evaluated": defaultdict(int)}
     out = []
     for fn in RULES:
         out.extend(fn(ds, th, ctx))
     out.extend(funnel_potential_findings(ds, th, answers))
+    _mark_paused(ds, th, out)
     out.sort(key=lambda f: (LEVEL_ORDER[f["level"]], -f["effect_rub"]))
-    return {"ref_cpa": ref, "ref_source": source, "findings": out, "evaluated": dict(ctx["evaluated"])}
+    return {"ref_cpa": ref, "ref_source": source, "ref_by_objective": by_obj, "findings": out,
+            "evaluated": dict(ctx["evaluated"])}
+
+
+def _mark_paused(ds, th, findings):
+    """Ревью: находка по живой группе на паузе (или в остановленной кампании) говорит об этом в действии —
+    советовать «сузить аудиторию» выключенной группе без оговорки нельзя."""
+    groups = {g["id"]: g for g in _live(ds)}
+    for f in findings:
+        g = groups.get(f["entity"]["id"]) if f["entity"]["type"] == "group" else None
+        if g is None or _active(g, th):
+            continue
+        prefix = ("Группа сейчас на паузе (кампания остановлена)." if g.get("status") in th["active_statuses"]
+                  else "Группа сейчас на паузе.")
+        f["action"] = f"{prefix} {f['action']}"
+        f["paused"] = True
 
 
 def main(argv=None) -> int:

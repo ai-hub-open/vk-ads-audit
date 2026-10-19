@@ -60,7 +60,10 @@ _MIN_DATE_RES = (re.compile(r"minimal allowed date is '(\d{4})-(\d{1,2})-(\d{1,2
 # Подтверждено 16.10.2026: «base» и «base,uniques» принимаются (вместо тяжёлого «all»). Дням охват не нужен.
 METRICS_DAY = "base"
 METRICS_SUMMARY = "base,uniques"   # охват и частота — только в uniques
-LISTS = ("vk_ads_remarketing_segments_list", "vk_ads_users_lists_list", "vk_ads_remarketing_pixels_list")
+# Третий живой прогон (MCP 0.12.0): с этими полями сегменты отдают relations [{"id","object_type","object_id"}] — по
+# ним слой (пиксель, база, ключевые фразы) и связь база → сегмент. Сервер отверг fields — повтор без них.
+SEGMENT_FIELDS = "id,name,pass_condition,flags,relations,relations_count,created,updated"
+LISTS = ("vk_ads_users_lists_list", "vk_ads_remarketing_pixels_list")
 MODES = ("deep", "quick")
 
 
@@ -165,7 +168,7 @@ class _Collector:
         if preflight:
             entry["preflight"] = True   # сбой предполётки в «Ограничения» клиента не идёт
         if no_access:
-            entry["no_access"] = True   # 429 с limits 0: нет прав; отчёт скажет «нет доступа к базам клиентов»
+            entry["no_access"] = True   # zero_quota / 429 с limits 0: нет прав; отчёт — «нет доступа к базам клиентов»
         self.log.append(entry)
 
     def probe(self, tool: str, args: dict):
@@ -209,12 +212,16 @@ class _Collector:
         self._record(tool, args)
         return items
 
-    def listing_with_fallback(self, tool: str, args: dict, base_fields: str):
-        """Расширенный список fields; сервер мог его отвергнуть (McpError) — один повтор с базовым."""
+    def listing_with_fallback(self, tool: str, args: dict, base_fields):
+        """Расширенный список fields; сервер мог его отвергнуть (McpError) — один повтор с базовым
+        (base_fields None — без fields вовсе)."""
         items = self.listing(tool, args)
         if items is None:
             failed = len(self.log) - 1
-            items = self.listing(tool, {**args, "fields": base_fields})
+            retry = {k: v for k, v in args.items() if k != "fields"}
+            if base_fields is not None:
+                retry["fields"] = base_fields
+            items = self.listing(tool, retry)
             self.supersede(failed, items)
         return items
 
@@ -278,6 +285,7 @@ def collect(client, raw_dir: Path, date_from: str, date_to: str, mode: str = "de
                     c.supersede(failed, banners)
                 banners = banners or []
                 banner_ids += [b["id"] for b in banners if b.get("status") != "deleted"]
+            c.listing_with_fallback("vk_ads_remarketing_segments_list", {"fields": SEGMENT_FIELDS}, None)
             for tool in LISTS:
                 c.listing(tool, {})
 

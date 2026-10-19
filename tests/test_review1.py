@@ -266,7 +266,7 @@ def test_no_access_line_only_for_users_lists(tmp_path):
                       "error": "429 limits 0", "no_access": True}]}
     ds = build_dataset(raw, *D, collect_log=log)
     lines = limitations(ds, log, None)
-    assert any(x.startswith("Не удалось получить vk_ads_remarketing_pixels_list") for x in lines)
+    assert any(x.startswith("Не удалось получить список пикселей") for x in lines)  # третий живой прогон: в отчёте русское название вызова, не имя инструмента
     assert not any("Нет доступа к базам клиентов" in x for x in lines)
 
 
@@ -287,7 +287,8 @@ def test_failed_preflight_not_in_client_limitations(tmp_path):
 
 def test_e7_unknown_reason_wording():
     ds = make_ds([make_group(1)], [make_banner(11, 1), make_banner(12, 1)])
-    assert status(checklist(ds), "E7")["reason"] == "кнопка не задана в объявлениях (call_to_action пустой)"
+    # третий живой прогон: имя поля API (call_to_action) в отчёт не идёт; кнопку ищем и в textblocks.cta_sites_full
+    assert status(checklist(ds), "E7")["reason"] == "кнопка не задана в объявлениях (поле кнопки пустое)"
 
 
 def test_quick_zero_spend_wording(tmp_path, monkeypatch, capsys):

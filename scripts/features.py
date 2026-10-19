@@ -27,10 +27,12 @@ AUTO_UTM_KEYS = ("enable_utm",)                                                 
 PLAN_BUDGET_KEYS = ("budget_limit", "budget_limit_day")                              # API? (кампания)
 SIZE_KEYS = ("size", "count", "entries_count", "audience_size")                      # API? (сегмент, база)
 UPDATED_KEYS = ("updated", "last_upload", "uploaded")                                # API? (база)
-SEGMENT_RELATION_KEYS = ("relations",)                                               # API? (сегмент → список связей)
-RELATION_TYPE_KEYS = ("object_type",)                                                # API? (элемент связи)
-RELATION_ID_KEYS = ("object_id",)                                                      # API? (элемент связи)
-USERS_LIST_TYPE_MARKERS = ("users_list", "user_list")                                # API? (тип объекта связи)
+SEGMENT_RELATION_KEYS = ("relations",)        # подтверждено 16.10.2026 (MCP 0.12.0, fields=…,relations,…)
+RELATION_TYPE_KEYS = ("object_type",)         # подтверждено 16.10.2026: relations[{"id","object_type","object_id"}]
+RELATION_ID_KEYS = ("object_id",)             # подтверждено 16.10.2026
+USERS_LIST_TYPE_MARKERS = ("users_list", "user_list")      # подтверждено 16.10.2026: remarketing_users_list (база)
+WARM_RELATION_TYPES = ("remarketing_counter",)              # подтверждено 16.10.2026: пиксель — тёплый слой
+KEYWORD_RELATION_TYPES = ("remarketing_search_phrases",)    # подтверждено 16.10.2026: ключевые фразы — холодный слой
 RATIOS = {"1:1": 1.0, "4:5": 0.8, "16:9": 16 / 9, "9:16": 9 / 16}
 RATIO_TOL = 0.04
 _LAL_RE = re.compile(r"lookalike|look-alike|\blal\b|похож", re.I)
@@ -48,6 +50,74 @@ def is_live_group(g) -> bool:
     issues = g.get("issues") or []
     codes = {i.get("code") if isinstance(i, dict) else i for i in issues}
     return g.get("status") != "deleted" and "ARCHIVED" not in codes
+
+
+PLAN_STOPPED_STATUSES = ("blocked", "deleted")   # кампания (ad_plan) остановлена или удалена — группы в ней не крутятся
+PLAN_STOPPED_ISSUE = "AD_PLAN_STOPPED"
+
+
+def paused_by_plan(g) -> bool:
+    """Группа со статусом active, но её кампания остановлена (третий живой прогон: кампании выключили в день сбора,
+    у их групп status active и issue AD_PLAN_STOPPED). Такая группа на паузе, а не активна."""
+    issues = g.get("issues") or []
+    codes = {i.get("code") if isinstance(i, dict) else i for i in issues}
+    return g.get("plan_status") in PLAN_STOPPED_STATUSES or PLAN_STOPPED_ISSUE in codes
+
+
+def is_active_group(g, active_statuses) -> bool:
+    """Единый помощник «группа реально откручивает»: статус из active_statuses и кампания не остановлена."""
+    return g.get("status") in active_statuses and not paused_by_plan(g)
+
+
+# Коды issues VK (группы, объявления, статус ОРД) → подписи в отчёте. Неизвестный код — «другая причина (КОД)»:
+# сырой код в скобках, чтобы специалист нашёл его в кабинете или документации VK (решение третьего живого прогона).
+ISSUE_LABELS = {
+    "OUT_OF_DAY_LIMIT": "превышен дневной лимит",
+    "OUT_OF_TOTAL_LIMIT": "исчерпан общий лимит",
+    "AD_PLAN_STOPPED": "кампания остановлена",
+    "ARCHIVED": "в архиве",
+    "NO_BANNERS": "нет объявлений",
+    "NO_BANNERS_WITH_ACTIVE_STATUS": "нет активных объявлений",
+    "STOPPED": "остановлена",
+    "PACKAGE_DELETED": "формат размещения удалён",
+    "NO_MONEY": "закончились деньги на балансе",
+}
+ORD_STATUS_LABELS = {"ACTIVE": "активен"}
+
+
+def issue_label(code) -> str:
+    return ISSUE_LABELS.get(code) or f"другая причина ({code})"
+
+
+def ord_status_label(v) -> str | None:
+    """or_status объявления по-человечески: «активен; коды: превышен дневной лимит». Строка (старая форма) — как
+    статус. None — статуса нет."""
+    if isinstance(v, dict):
+        st = v.get("status") or v.get("major_status")
+        codes = [c for c in v.get("codes") or [] if c]
+    elif isinstance(v, str) and v.strip():
+        st, codes = v.strip(), []
+    else:
+        return None
+    text = ORD_STATUS_LABELS.get(st) or (f"другой статус ({st})" if st else "статус не указан")
+    if codes:
+        text += "; коды: " + ", ".join(issue_label(c) for c in codes)
+    return text
+
+
+GROUP_STATUS_LABELS = {"active": "активна", "blocked": "на паузе", "deleted": "удалена"}
+
+
+def group_status_label(g) -> str:
+    """Статус группы по-человечески: сырое значение API в отчёт не идёт (неизвестное — «другой статус (…)»)."""
+    if g.get("status") == "deleted":
+        return "удалена"
+    if not is_live_group(g):
+        return "в архиве"
+    if g.get("status") == "active" and paused_by_plan(g):
+        return "на паузе (кампания остановлена)"
+    st = g.get("status")
+    return GROUP_STATUS_LABELS.get(st) or (f"другой статус ({st})" if st else "—")
 
 
 def observed_keys(dicts) -> set:
@@ -137,26 +207,98 @@ def url_strings(v) -> list:
     return out
 
 
+CTA_TEXTBLOCK = "cta_sites_full"   # подтверждено 16.10.2026: кнопка лежит в textblocks.cta_sites_full.text (learnMore …)
+
+
+def _is_cta_block(key) -> bool:
+    return str(key).startswith("cta_")
+
+
 def banner_text(textblocks) -> str:
+    """Текст объявления без блоков кнопки (cta_*): код кнопки (learnMore) — не призыв в тексте."""
     if not isinstance(textblocks, dict):
         return ""
-    parts = [tb.get("text") for tb in textblocks.values() if isinstance(tb, dict)]
+    parts = [tb.get("text") for k, tb in textblocks.items() if isinstance(tb, dict) and not _is_cta_block(k)]
     return " ".join(p for p in parts if isinstance(p, str) and p.strip())
+
+
+def banner_cta(banner) -> str | None:
+    """Кнопка объявления: call_to_action, а если он пуст (живой прогон: null у всех) — textblocks.cta_sites_full.text,
+    затем любой другой блок cta_*. None — кнопки в ответе нет."""
+    cta = banner.get("call_to_action") if isinstance(banner, dict) else None
+    if cta not in (None, ""):
+        return str(cta)
+    tbs = banner.get("textblocks") if isinstance(banner, dict) else None
+    if not isinstance(tbs, dict):
+        return None
+    keys = [CTA_TEXTBLOCK] + sorted(k for k in tbs if _is_cta_block(k) and k != CTA_TEXTBLOCK)
+    for k in keys:
+        text = (tbs.get(k) or {}).get("text") if isinstance(tbs.get(k), dict) else None
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+    return None
 
 
 def is_lal(segment) -> bool:
     return bool(_LAL_RE.search(json.dumps(segment, ensure_ascii=False)))
 
 
-def layer_of(segment_ids, segments_by_id: dict):
-    """cold / warm / lal; None — сегмент не найден в списке сегментов (или список не собран): слой неизвестен."""
-    if not segment_ids:
-        return "cold"
-    if any(sid in segments_by_id and is_lal(segments_by_id[sid]) for sid in segment_ids):
+def relation_types(segment) -> list:
+    """Типы объектов связей сегмента (relations[].object_type) в нижнем регистре; [] — связей нет или не пришли."""
+    out: list = []
+    for rel_key in SEGMENT_RELATION_KEYS:
+        for rel in (segment.get(rel_key) or []) if isinstance(segment, dict) else []:
+            if isinstance(rel, dict):
+                kind = next((rel[k] for k in RELATION_TYPE_KEYS if isinstance(rel.get(k), str)), "")
+                if kind:
+                    out.append(kind.lower())
+    return out
+
+
+def _warm_type(t: str) -> bool:
+    return t in WARM_RELATION_TYPES or any(m in t for m in USERS_LIST_TYPE_MARKERS)
+
+
+def is_keyword_segment(segment) -> bool:
+    """Сегмент ключевых фраз (relation remarketing_search_phrases): фразы хранятся в сегменте."""
+    return any(t in KEYWORD_RELATION_TYPES for t in relation_types(segment))
+
+
+def segment_kind(segment):
+    """lal / warm (пиксель, база) / keywords (ключевые фразы — холодный слой); None — тип по связям не определить
+    (связей нет, как в старых raw/, или тип незнакомый)."""
+    if is_lal(segment):
         return "lal"
+    types = relation_types(segment)
+    if any(_warm_type(t) for t in types):   # несколько связей разных типов: хоть одна тёплая — тёплый
+        return "warm"
+    if types and all(t in KEYWORD_RELATION_TYPES for t in types):
+        return "keywords"
+    return None
+
+
+def layer_info(segment_ids, segments_by_id: dict):
+    """Слой группы по целевым сегментам: {"layer": cold / warm / lal, "guessed", "subtype"}; None — сегмент не найден
+    в списке сегментов (или список не собран). guessed — тип хотя бы одного сегмента по связям не определён и слой
+    взят по прежней логике «не LAL — тёплый» (низкая надёжность). subtype keywords — холодный слой ключевых фраз."""
+    if not segment_ids:
+        return {"layer": "cold", "guessed": False, "subtype": None}
+    if any(sid in segments_by_id and is_lal(segments_by_id[sid]) for sid in segment_ids):
+        return {"layer": "lal", "guessed": False, "subtype": None}
     if any(sid not in segments_by_id for sid in segment_ids):
         return None
-    return "warm"
+    kinds = [segment_kind(segments_by_id[sid]) for sid in segment_ids]
+    if "warm" in kinds:
+        return {"layer": "warm", "guessed": False, "subtype": None}
+    if all(k == "keywords" for k in kinds):
+        return {"layer": "cold", "guessed": False, "subtype": "keywords"}
+    return {"layer": "warm", "guessed": True, "subtype": None}
+
+
+def layer_of(segment_ids, segments_by_id: dict):
+    """cold / warm / lal; None — сегмент не найден в списке сегментов (или список не собран): слой неизвестен."""
+    info = layer_info(segment_ids, segments_by_id)
+    return info["layer"] if info else None
 
 
 def users_list_ids(segment) -> list:

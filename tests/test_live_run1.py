@@ -202,7 +202,7 @@ def test_no_access_line_in_report_limitations(tmp_path):
     ds = build_dataset(raw, *D, collect_log=log)
     lines = limitations(ds, log, checklist(ds))
     assert any("нет доступа к базам клиентов" in x.lower() for x in lines)
-    assert not any(x.startswith("Не удалось получить vk_ads_users_lists_list") for x in lines)
+    assert not any(x.startswith("Не удалось получить базы клиентов") for x in lines)  # третий живой прогон: в отчёте русское название вызова, не имя инструмента
 
 
 # ---- 10. сегменты без size и relations (живая форма) ----
@@ -216,7 +216,7 @@ def test_segments_without_size_and_relations(tmp_path):
     write_call(raw, "vk_ads_users_lists_list", {"paginated": True},
                {"items": [{"id": 9, "name": "Клиенты", "updated": "2025-01-01 00:00:00"}]})
     ds = build_dataset(raw, *D)
-    assert any("не возвращает размер сегментов" in n for n in ds["notes"])
+    assert any("не отдаёт через API размер сегментов" in n for n in ds["notes"])   # без «MCP» в тексте для клиента
     cl = checklist(ds)
     assert status(cl, "C13")["status"] == "unknown" and status(cl, "C14")["status"] == "unknown"
     assert found(ds, "lal_small_source") == []

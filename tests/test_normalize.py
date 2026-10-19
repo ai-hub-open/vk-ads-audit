@@ -9,10 +9,12 @@ from scripts.raw_store import write_call
 P = {"date_from": "2026-09-01", "date_to": "2026-09-30", "metrics": "base"}
 
 
-def base(spent="0", shows=0, clicks=0, goals=0, ctr=None, vk_result=0):
+def base(spent="0", shows=0, clicks=0, goals=0, ctr=None, vk_result=None):
     ctr = (clicks / shows * 100) if (ctr is None and shows) else (ctr or 0)   # ctr VK — уже проценты
+    # Третий живой прогон: конверсии — «Результат» VK (vk.result); в синтетике он по умолчанию равен goals
+    vk_result = goals if vk_result is None else vk_result
     return {"base": {"spent": spent, "shows": shows, "clicks": clicks, "goals": goals, "ctr": ctr,
-                     "vk": {"result": vk_result}},
+                     "vk": {"goals": vk_result, "result": vk_result}},
             "uniques": {"reach": shows // 2, "frequency": 2.0 if shows else 0}}
 
 
@@ -50,9 +52,10 @@ def test_stats_ratios():
 
 
 def test_conversion_source_by_objective():
+    # Третий живой прогон (решение методиста): «Результат» VK — для всех целей, в том числе site_conversions
     block = base(spent="100", shows=100, clicks=10, goals=0, vk_result=5)
     assert stats_from(block, "leadads")["conversions"] == 5
-    assert stats_from(block, "site_conversions")["conversions"] == 0
+    assert stats_from(block, "site_conversions")["conversions"] == 5
 
 
 def test_aggregate_daily():

@@ -43,7 +43,7 @@ def test_dynamic_limitations():
     lines = limitations(ds, log)
     assert any("путь A" in x for x in lines)
     assert any("Метрика" in x for x in lines)
-    assert any("vk_ads_users_lists_list" in x for x in lines)
+    assert any(x.startswith("Не удалось получить базы клиентов") for x in lines)  # третий живой прогон: в отчёте русское название вызова, не имя инструмента
 
 
 def test_coverage_stats_pixels_and_abort_limitations():

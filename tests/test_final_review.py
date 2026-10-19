@@ -178,7 +178,7 @@ def test_limitations_skip_superseded_and_add_one_line():
         {"tool": "vk_ads_users_lists_list", "ok": False, "error": "HTTP 500"}], "errors": 3}
     lines = limitations(ds, log)
     assert not any("vk_ads_campaigns_list" in x or "vk_ads_banners_list" in x for x in lines)
-    assert any("users_lists_list" in x for x in lines)
+    assert any(x.startswith("Не удалось получить базы клиентов") for x in lines)  # третий живой прогон: в отчёте русское название вызова, не имя инструмента
     line = "Расширенные поля не приняты сервером — часть проверок (маркировка, UTM, кнопки) не проверена"
     assert lines.count(line) == 1
     assert line not in limitations(ds, {"calls": [], "errors": 0})

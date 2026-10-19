@@ -1,6 +1,6 @@
 # Инструменты MCP vk-ads для аудита (только чтение)
 
-Сервер vk-ads-mcp 0.11.0. Иерархия: `ad_plan` (UI «Кампания») → `campaign` (UI «Группа») → `banner` (UI «Объявление»).
+Сервер vk-ads-mcp 0.12.0 (третий живой прогон 16.10.2026; формы ответов ниже подтверждены на нём). Иерархия: `ad_plan` (UI «Кампания») → `campaign` (UI «Группа») → `banner` (UI «Объявление»).
 `campaigns_*` и `ad_groups_*` — один ресурс; используем `campaigns_*`.
 
 ## Порядок сбора (путь A повторяет его руками)
@@ -22,7 +22,7 @@
 | 1 | `vk_ads_ad_plans_list` | `fields=id,name,status,objective,budget_limit,budget_limit_day,date_start,date_end,created,updated`, `limit=250`, `offset` | `vk_ads_ad_plans_list__NNN.json` |
 | 2 | `vk_ads_campaigns_list` | `fields=id,name,status,objective,package_id,ad_plan_id,budget_limit,budget_limit_day,targetings,issues,created,updated,date_start,date_end,delivery,autobidding_mode,max_price,priced_goal,enable_utm,utm` | `vk_ads_campaigns_list__NNN.json` |
 | 3 | `vk_ads_banners_list` | `campaign_id=<группа>`, `fields=id,name,campaign_id,status,moderation_status,moderation_reasons,issues,delivery,textblocks,urls,content,created,updated,user_can_request_remoderation,call_to_action,ord_marker,or_status` | по файлу на группу |
-| 4 | `vk_ads_remarketing_segments_list`, `vk_ads_users_lists_list`, `vk_ads_remarketing_pixels_list` | — | по файлу |
+| 4 | `vk_ads_remarketing_segments_list` — `fields=id,name,pass_condition,flags,relations,relations_count,created,updated` (сервер отверг — повтор без `fields`); `vk_ads_users_lists_list`, `vk_ads_remarketing_pixels_list` — без аргументов | — | по файлу |
 | 5 | `vk_ads_statistics_day` | `entity=campaigns`, `ids` ≤ 50 через запятую (все группы, кроме удалённых), `date_from`, `date_to`, `metrics=base` | по файлу на пачку |
 | 6 | `vk_ads_statistics_day` | `entity=banners`, `ids` объявлений (≤ 50 в пачке), `date_from`, `date_to`, `metrics=base` | по файлу на пачку |
 | 7 | `vk_ads_statistics_summary` | `entity=campaigns`, `ids` как в шаге 5, `metrics=base,uniques`, **без `date_from` / `date_to`** — **необязательно**: охват и частота только у групп, созданных внутри периода | по файлу на пачку |
@@ -61,9 +61,12 @@
   `statistics_summary` — только за всё время (без дат), `statistics_day` — за период; глубина дневной истории 366 дней.
   У `metrics=base` блока `uniques` нет: охват и частота дней — «не определены» (`None`), а не 0.
 - `base`: `shows`, `clicks`, `goals`, `spent` (строка, ₽), `cpm`/`cpc`/`cpa` (строки), `ctr`/`cr` — **уже проценты**
-  (608 кликов на 117 469 показов → `ctr: 0.5176` = 0,52 %), `vk.{goals,result,cpa,cr,cpr}`.
-- `uniques`: `reach`, `frequency`.
-- Группа: `budget_limit`/`budget_limit_day` — **рубли** (50000 = «50 000 ₽» в кабинете); `max_price` — строка в рублях; `issues: [{"code","message"}]`;
+  (608 кликов на 117 469 показов → `ctr: 0.5176` = 0,52 %), `vk.{goals,result,cpa,cr,cpr}`. **Конверсии — `vk.result`**
+  («Результат» по цели оптимизации, как в кабинете; `vk.goals` ему равен); `base.goals` — все цели пикселя, справочно.
+- `uniques`: `reach`, `total`, `increment`, `frequency` — смысл не подтверждён (см. ниже): скрипты берут только `reach`
+  (0 при показах — «нет данных»), частота — показы / охват.
+- Группа: `budget_limit`/`budget_limit_day` — **рубли** (50000 = «50 000 ₽» в кабинете; у групп `budget_limit_day`
+  всегда число, у кампаний «без лимита» — `null`); `max_price` — строка в рублях; `issues: [{"code","message"}]`;
   `delivery`; `autobidding_mode` (например `max_goals`); `targetings` (`geo.regions`, `age.age_list`, `sex`, `pads`, `fulltime`…).
 - Ошибка: `isError` + текст, часто JSON `{"error": true, "status": N, "detail": ...}`.
 
@@ -85,35 +88,56 @@
   date_to, metrics="base")` → `{"items": [{"id", "total": {"base": {"spent": "0", ...}}, "rows": [{"date", "base"}]}],
   "total": {"base": {...}}}`; предполётка читает `items[].total.base.spent` (строка).
 - Поле группы `auto_utm` → `400 unknown_resource_fields`; приходят `enable_utm` (bool) и `utm` (у удалённой группы null).
+  MCP 0.12.0 отдаёт `enable_utm: false` явно (третий прогон, у всех групп кроме одной), а не опускает ключ.
 - Поля объявления `erid`, `ord_token`, `ord_erid` → 400; маркировка ОРД лежит в `ord_marker` (строка, например `2VtzquiRr5b`).
-  `or_status` (статус ОРД) — тоже допустимое поле; что значат его значения, не подтверждено: скрипты его сохраняют
-  (`ord_status` в `dataset.json`) и показывают в отчёте справочно, в проверку A2 он не идёт.
-- `vk_ads_users_lists_list` → HTTP 429 с `limits: {"1": 0}`: у подключения нет прав на базы клиентов, повтор бесполезен.
-- Сегменты приходят только с `id, name, pass_condition, flags, created, updated` — без `size` и без `relations` (дефект MCP):
-  размер LAL-сегментов и связь база → сегмент недоступны.
-- Группа: `utm` — строка-шаблон UTM (`utm_source=vk_ads&utm_medium=cpa&utm_campaign=…&utm_term={{gender}}_{{age}}`) или null;
-  `enable_utm: true` приходит только у части групп, у остальных ключ опущен. Группа считается размеченной при `enable_utm`
-  true или непустом `utm`; что отсутствие ключа значит «выключено», методист подтвердить не смогла (второй прогон
-  16.10.2026) — такая группа «не подтверждена» (`auto_utm` None), A3 по ней не ставит ❌.
+  `or_status` (статус ОРД) — объект `{"codes": [...], "major_status": "ACTIVE", "status": "ACTIVE"}` (третий прогон;
+  коды — те же, что `issues`, например `OUT_OF_DAY_LIMIT`): скрипты хранят его структурой (`ord_status`) и показывают
+  справочно по-русски («активен; коды: превышен дневной лимит»), в проверку A2 он не идёт.
+- `vk_ads_users_lists_list` без прав: MCP 0.11 — HTTP 429 с `limits: {"1": 0}`, MCP 0.12.0 — **HTTP 403 с `code:
+  zero_quota`** (`detail.upstream_status: 429`). Повтор бесполезен; скрипты считают «нет доступа» `zero_quota` при любом
+  статусе и 429 с нулевым лимитом.
+- Сегменты без `fields` приходят только с `id, name, pass_condition, flags, created, updated`; с
+  `fields=id,name,pass_condition,flags,relations,relations_count,created,updated` (MCP 0.12.0) — с
+  `relations: [{"id", "object_type", "object_id"}]`. Типы: `remarketing_counter` (пиксель), `remarketing_users_list`
+  (база клиентов), `remarketing_search_phrases` (ключевые фразы). `size` по-прежнему не приходит.
+- Группа: `utm` — строка-шаблон UTM (`utm_source=vk_ads&utm_medium=cpa&utm_campaign=…&utm_term={{gender}}_{{age}}`) или null.
+  Второй прогон (MCP 0.11): `enable_utm: true` приходил только у части групп, у остальных ключ опущен — что отсутствие
+  ключа значит «выключено», методист подтвердить не смогла: такая группа «не подтверждена» (`auto_utm` None), A3 по ней
+  не ставит ❌. MCP 0.12.0 отдаёт явный `false` — скрипты, как и раньше, читают явный `false` как «выключено» (A3 по ссылкам
+  без `utm_`). Группа считается размеченной при `enable_utm` true или непустом `utm`.
 - `autobidding_mode: second_price_mean` — **ручная ставка**: ставка лежит в `price`, списывается фактический CPM; это не
-  автостратегия.
-- `call_to_action` у всех объявлений кабинета — `null`; роли контента вида `video_landscape_180s` (соотношения сторон в
+  автостратегия. В большом кабинете третьего прогона у всех групп — `max_goals`.
+- `call_to_action` у всех объявлений кабинета — `null`; кнопка лежит в `textblocks.cta_sites_full.text`
+  (`learnMore`, `visitSite`, `order`; третий прогон). Роли контента вида `video_landscape_180s` (соотношения сторон в
   имени нет); удалённые и архивные группы приходят с `issues: [{"code": "ARCHIVED"}]`.
 - В claude.ai и Claude Desktop у коннектора vk-ads нет персональной ссылки подключения — сбор всегда идёт путём A.
   Большие ответы (список групп ≈ 260 КБ) приходят файлом — `raw_store import`.
 
+### Третий живой прогон (16.10.2026, MCP 0.12.0, большой боевой кабинет: больше сотни групп)
+
+- Конверсии: у групп с целью `site_conversions` (`priced_goal` — событие пикселя) `base.goals` в 3,8 раза больше
+  `base.vk.result`, бывает больше кликов; `vk.goals` == `vk.result`. Решение методиста: конверсии — `vk.result`
+  (`CONVERSION_SOURCE` в `scripts/normalize.py`), `base.goals` — справочно (`goals_all`).
+- `uniques` в сводке бессмысленны для периода: `reach` всегда 0, `total` — миллионы при десятках тысяч показов,
+  `increment` непонятен. В сводке «за всё время» есть и сегодняшние показы. Скрипты: `reach` 0 при показах — `None`,
+  частоту из `uniques.frequency` / `total` / `increment` не берут, F3 честно «unknown».
+- В день сбора кабинет правили: у кампаний `updated` позже конца периода, часть кампаний остановлена (`status:
+  blocked`), у их активных групп issue `AD_PLAN_STOPPED`. Такая группа — «на паузе (кампания остановлена)», не активна;
+  `AD_PLAN_STOPPED` убран из `blocking_issue_codes` (решение методиста). Отчёт предупреждает «Кабинет менялся после
+  конца периода: статусы и бюджеты показаны на дату сбора»; лидер с урезанным после периода бюджетом — ⚪
+  `leader_budget_changed`, а не «+50 %».
+- Статистика: 50 `ids` в одном вызове `vk_ads_statistics_day` и `vk_ads_statistics_summary` проходят.
+
 ## Проверить живым прогоном (до релиза 0.1.0)
 
-- Конверсии: `base.goals` (сайт) и `base.vk.result` (лид-формы, сообщество) — верно ли по целям (`CONVERSION_SOURCE` в `scripts/normalize.py`).
 - Допуск проверки `ctr_units` (`check_sanity`) против округления `ctr` на стороне VK.
-- Сколько `ids` принимает один вызов статистики (сейчас пачки по 50).
 - Имена полей объявления: `moderation_status`, `moderation_reasons`, `user_can_request_remoderation`.
-- Реальный набор значений `autobidding_mode`: видны `max_goals` (автостратегия) и `second_price_mean` (ручная ставка,
-  подтверждено 16.10.2026); другие значения — неизвестны (`auto_bidding_modes` и `manual_bidding_modes` в `thresholds.json`).
+- Реальный набор значений `autobidding_mode`: видны `max_goals` (автостратегия; в большом кабинете — у всех групп) и
+  `second_price_mean` (ручная ставка, подтверждено 16.10.2026); другие значения — неизвестны (`auto_bidding_modes` и
+  `manual_bidding_modes` в `thresholds.json`).
 - Сервер stateless (tools/call без initialize; живой probe 2026-10-14, `Mcp-Session-Id` не выдаётся) — если probe
   начнёт падать с ошибкой сессии, нужен handshake в `mcp_client`.
 - Удалённые объявления в `banners_list` отдаются? (от этого зависит, насколько сумма по объявлениям меньше расхода группы).
-- Смысл `budget_limit_day` для «без лимита»: 0 или null (правила `low_budget` и `scale_leader` считают оба значения «лимита нет»).
 
 ### Признак → ключи-кандидаты (имена по документации, подтверждает живой прогон)
 
@@ -138,13 +162,15 @@
 | бюджет кампании (CBO) | `PLAN_BUDGET_KEYS` | `budget_limit`, `budget_limit_day` | кампания (`ad_plan`) |
 | размер сегмента, базы | `SIZE_KEYS` | `size`, `count`, `entries_count`, `audience_size` | сегмент, пользовательская база |
 | дата обновления базы | `UPDATED_KEYS` | `updated`, `last_upload`, `uploaded` | пользовательская база |
-| связи сегмента (с базами) | `SEGMENT_RELATION_KEYS` | `relations` | сегмент |
-| тип и id объекта связи | `RELATION_TYPE_KEYS`, `RELATION_ID_KEYS` | `object_type`, `object_id` | элемент `relations`; база опознаётся по типу, содержащему `users_list` или `user_list` (`USERS_LIST_TYPE_MARKERS`) |
+| связи сегмента (с базами) | `SEGMENT_RELATION_KEYS` | `relations` | сегмент (подтверждено, MCP 0.12.0) |
+| тип и id объекта связи | `RELATION_TYPE_KEYS`, `RELATION_ID_KEYS` | `object_type`, `object_id` | элемент `relations` (подтверждено); база — тип с `users_list` / `user_list` (`USERS_LIST_TYPE_MARKERS`), пиксель — `remarketing_counter` (`WARM_RELATION_TYPES`), ключевые фразы — `remarketing_search_phrases` (`KEYWORD_RELATION_TYPES`) |
+| кнопка объявления | `CTA_TEXTBLOCK` | `call_to_action`, затем `textblocks.cta_sites_full.text` | объявление (подтверждено) |
 
 Что ещё закрыть живым прогоном для методики v1:
 
-- `call_to_action` — ключ кнопки объявления (E7): в кабинете первого прогона везде `null` (E7 — «unknown»); какое значение
-  у «Подробнее» (`learn_more`, `more`, `read_more` или русский текст — словарь `generic_cta` в `thresholds.json`), не видно.
+- Кнопка объявления (E7) закрыта третьим прогоном: `call_to_action` — `null`, кнопка в `textblocks.cta_sites_full.text`;
+  «Подробнее» — `learnMore` (в `generic_cta`). Считать ли общими `visitSite` («Перейти на сайт») и `order`
+  («Заказать») — решает методист; пока нет.
 - `country_region_ids` (`thresholds.json`, сейчас `[188]` — Россия?) — id региона «вся страна» в `targetings.geo.regions`.
 - Значения `moderating_statuses` (сейчас `new`, `delayed`, `moderating`) — какие статусы модерации реально отдаёт
   сервер, пока объявление не проверено.
@@ -152,14 +178,14 @@
   какие соотношения он кодирует; роль, из которой соотношение не читается (`video_landscape_180s`), даёт «unknown»
   у этого объявления (`ratios_unknown`), не ❌.
 - Тип сегмента LAL: по каким полям сегмент опознаётся как lookalike (сейчас — по имени и описанию).
-- Связь сегмент → база (`relations`, `object_type`, `object_id`): `remarketing_segments_list` их не отдаёт (дефект MCP),
-  поэтому `stale_list` — карточка низкой надёжности, а пункт C14 — «unknown». Как называется тип «пользовательская
-  база», когда поля появятся, — подтвердить.
+- Связь сегмент → база закрыта третьим прогоном: с `fields=…,relations,…` сегменты отдают `relations`, тип базы —
+  `remarketing_users_list`. Без связей (старые `raw/`) `stale_list` — карточка низкой надёжности, C14 — «unknown»,
+  слой — «по догадке» (`layer_guessed`).
 - `max_price` при автостратегии (`max_goals`): хранит ли VK предельную цену вместе с автостратегией (правило
   `cap_too_early` для групп с автостратегией молчит). Единицы `max_price`: `max_price_rub` в `normalize.py` берёт его
   через `money()` (рубли) — как и бюджеты; подтвердить, что `max_price` тоже в рублях.
-- Флаги, включённые по умолчанию (`enable_utm`, `auto_placements`, `expand_keywords`): отсутствие ключа у группы ≠
-  выключено, если VK опускает значения по умолчанию.
+- Флаги, включённые по умолчанию (`auto_placements`, `expand_keywords`): отсутствие ключа у группы ≠ выключено, если VK
+  опускает значения по умолчанию. `enable_utm` с MCP 0.12.0 приходит явным `false`.
 - Регулярное выражение «названия по умолчанию» (B7) и названия со временем вида «12:30» — не считаются ли они
   говорящими.
 - Полный возрастной диапазон по умолчанию у VK (для C2): какой `age_list` отдаёт группа без возрастного таргетинга.

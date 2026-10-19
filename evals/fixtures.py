@@ -1,4 +1,4 @@
-"""Синтетические кабинеты VK в формате raw/ (как отдаёт vk-ads-mcp 0.11.0, формы подтверждены живым прогоном 16.10.2026):
+"""Синтетические кабинеты VK в формате raw/ (как отдаёт vk-ads-mcp 0.12.0, формы подтверждены живыми прогонами 16.10.2026):
 бюджеты — рубли, ctr — проценты, итоги периода — сумма statistics_day (по группам и объявлениям), statistics_summary —
 без дат, за всё время (нужна только ради охвата и частоты групп, созданных внутри периода)."""
 from __future__ import annotations
@@ -11,9 +11,12 @@ P = {"date_from": "2026-09-01", "date_to": "2026-09-30", "metrics": "base"}
 DAYS = [f"2026-09-{d:02d}" for d in range(1, 31)]
 
 
-def block(spent, shows, clicks, goals, frequency=2.0):
+def block(spent, shows, clicks, result, frequency=2.0, goals_all=None):
+    """result — «Результат» VK (vk.result): с третьего живого прогона это и есть конверсии (решение методиста).
+    goals_all — все цели пикселя (base.goals), справочно; по умолчанию равен результату."""
+    goals = result if goals_all is None else goals_all
     return {"base": {"spent": f"{spent:.2f}", "shows": shows, "clicks": clicks, "goals": goals,
-                     "ctr": (clicks / shows * 100) if shows else 0, "vk": {"result": 0}},
+                     "ctr": (clicks / shows * 100) if shows else 0, "vk": {"goals": result, "result": result}},
             "uniques": {"reach": int(shows / frequency) if shows else 0, "frequency": frequency if shows else 0}}
 
 
@@ -33,7 +36,8 @@ def banners(gid, n=3, **kw):
 
 def write_cabinet(raw: Path, groups, banners_by_group, per_day, pixels=1, segments=(), plans=None,
                   segment_items=None, users_lists=()):
-    """per_day[gid] — (spent, shows, clicks, goals) за каждый день или список из 30 таких кортежей; сводка — сумма."""
+    """per_day[gid] — (spent, shows, clicks, result[, goals_all]) за каждый день или список из 30 таких кортежей;
+    сводка — сумма. result — «Результат» VK (конверсии), goals_all — все цели пикселя (справочно)."""
     write_call(raw, "vk_ads_ad_plans_list", {"paginated": True}, {"items": plans or [{"id": 1, "name": "План"}]})
     write_call(raw, "vk_ads_campaigns_list", {"paginated": True}, {"items": groups})
     for gid, bs in banners_by_group.items():
@@ -49,10 +53,11 @@ def write_cabinet(raw: Path, groups, banners_by_group, per_day, pixels=1, segmen
     for gid in live:
         spec = per_day.get(gid, (0, 0, 0, 0))
         days = spec if isinstance(spec, list) else [spec] * len(DAYS)
-        tot = [sum(d[i] for d in days) for i in range(4)]
+        tot = [sum(d[i] if i < len(d) else d[3] for d in days) for i in range(5)]
         freq = 6.0 if gid in FREQ6 else 2.0
-        summary.append({"id": gid, "total": block(*tot, frequency=freq)})
-        daily.append({"id": gid, "rows": [{"date": d, **block(*v)} for d, v in zip(DAYS, days)]})
+        summary.append({"id": gid, "total": block(*tot[:4], frequency=freq, goals_all=tot[4])})
+        daily.append({"id": gid, "rows": [{"date": d, **block(*v[:4], goals_all=v[4] if len(v) > 4 else None)}
+                                          for d, v in zip(DAYS, days)]})
         bs = banners_by_group.get(gid, [])
         for b in bs:
             share = 1 / len(bs)
@@ -89,7 +94,10 @@ def healthy(raw: Path) -> dict:
     plans = [{"id": 1, "name": "ретарг_сайт_Мск", "budget_limit_day": 3000},
              {"id": 2, "name": "LAL_клиенты_Мск", "budget_limit_day": 3000},
              {"id": 3, "name": "холод_интересы_Мск", "budget_limit_day": 3000}]
-    segs = [{"id": 101, "name": "Посетители сайта 30 дней"}, {"id": 102, "name": "LAL на клиентов 3%", "size": 120},
+    # MCP 0.12.0 отдаёт relations: пиксель (remarketing_counter) — тёплый слой подтверждён, а не «по догадке»
+    segs = [{"id": 101, "name": "Посетители сайта 30 дней",
+             "relations": [{"id": 1, "object_type": "remarketing_counter", "object_id": 77}]},
+            {"id": 102, "name": "LAL на клиентов 3%", "size": 120},
             {"id": 601, "name": "Клиенты — исключение",
              "relations": [{"object_type": "remarketing_users_list", "object_id": 601}]}]
     # исключение клиентов и ретаргета; места размещения — автоматические
@@ -121,7 +129,7 @@ def leaking(raw: Path) -> dict:
     groups = [group(1, [1]), group(2, [2]), group(3, [3])]
     write_cabinet(raw, groups, {1: banners(1), 2: banners(2), 3: banners(3)},
                   {1: (500, 10000, 150, 2),      # норма: CPA 250
-                   2: (400, 10000, 100, 0),      # 12 000 ₽ без конверсий
+                   2: (400, 10000, 100, 0, 30),  # 12 000 ₽ без «Результата»; 30 «всех целей пикселя» — не конверсии
                    3: (900, 10000, 120, 1)})     # CPA 900 > 300 × 1.5
     return {**P, "target_cpa": 300.0, "expected": {("spend_no_conversions", 2), ("cpa_above_target", 3)},
             "scope": LEAKING_SCOPE, "as_of": "2026-10-01T10:00"}

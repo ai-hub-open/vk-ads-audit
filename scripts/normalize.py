@@ -6,8 +6,12 @@ normalize.py — raw/ → dataset.json. Единицы приводятся ТО
 - CTR считаем сами из clicks/shows, значение VK (оно уже в процентах) храним для проверки единиц;
 - итоги периода — сумма строк statistics_day: statistics_summary отдаёт только всё время (даты в неё не передаются),
   поэтому охват и частота берутся из сводки только для групп, чья жизнь целиком в периоде;
-- metrics=base у дней: блока uniques нет — охват и частота «не определены» (None), а не 0;
-- конверсии: base.goals, для целей из CONVERSION_SOURCE — base.vk.result.
+- metrics=base у дней: блока uniques нет — охват и частота «не определены» (None), а не 0; reach 0 при показах — тоже
+  None, частота — только показы / охват (uniques.frequency, total, increment не берём: смысл не подтверждён);
+- конверсии — base.vk.result («Результат» по цели оптимизации, как в кабинете VK; решение методиста, третий живой
+  прогон: base.goals — все цели пикселя, у site_conversions в разы больше результата и бывает больше кликов); CPA =
+  расход / результат. base.goals хранится справочно (goals_all). Блока vk нет (старые raw/) — конверсии из goals,
+  с заметкой в «Ограничениях». Проверки здравого смысла на goals не опираются.
 Проверка здравого смысла (check_sanity) останавливает аудит на кривых числах.
 Нулевой расход (spend_state): нет живых групп и расхода нет — код 5, dataset.json не пишется (аудит строить не на чем;
 статистика по архивным не получена — код 3, «статистика не получена»); живые группы есть, их расход известен и равен 0 —
@@ -31,9 +35,9 @@ try:
     from scripts._workspace import resolve_workspace
     from scripts.features import (AUTO_UTM_KEYS, ERID_KEYS, EXCLUDE_KEYS, ORD_STATUS_KEYS, PLAN_BUDGET_KEYS, SIZE_KEYS,
                                   UPDATED_KEYS, plural,
-                                  SEGMENT_RELATION_KEYS, banner_text, content_features, first_known, is_lal,
-                                  is_live_group, layer_of, observed_keys, parse_dt, targeting_features,
-                                  url_strings, users_list_ids)
+                                  SEGMENT_RELATION_KEYS, banner_cta, banner_text, content_features, first_known, is_lal,
+                                  is_active_group, is_keyword_segment, is_live_group, layer_info, observed_keys,
+                                  parse_dt, segment_kind, targeting_features, url_strings, users_list_ids)
     from scripts.collect import total_spend
     from scripts.raw_store import items_of, mark_recovered, read_calls
 except ImportError:  # запуск напрямую
@@ -41,13 +45,15 @@ except ImportError:  # запуск напрямую
     from _workspace import resolve_workspace
     from features import (AUTO_UTM_KEYS, ERID_KEYS, EXCLUDE_KEYS, ORD_STATUS_KEYS, PLAN_BUDGET_KEYS, SIZE_KEYS,
                           UPDATED_KEYS, plural,
-                          SEGMENT_RELATION_KEYS, banner_text, content_features, first_known, is_lal,
-                          is_live_group, layer_of, observed_keys, parse_dt, targeting_features,
-                          url_strings, users_list_ids)
+                          SEGMENT_RELATION_KEYS, banner_cta, banner_text, content_features, first_known, is_lal,
+                          is_active_group, is_keyword_segment, is_live_group, layer_info, observed_keys,
+                          parse_dt, segment_kind, targeting_features, url_strings, users_list_ids)
     from collect import total_spend
     from raw_store import items_of, mark_recovered, read_calls
 
-CONVERSION_SOURCE = {"leadads": "vk.result", "socialengagement": "vk.result"}
+CONVERSION_SOURCE = "vk.result"   # для всех целей: «Результат» VK по цели оптимизации; base.goals — справочно
+CONVERSION_NOTE = ("Конверсии части статистики взяты из всех целей пикселя: показатель «Результат» VK не пришёл — "
+                   "конверсии и CPA по таким строкам могут быть завышены.")
 NOT_TARGETING = ("fulltime",)
 
 
@@ -81,22 +87,51 @@ def _ratios(spent: float, shows: int, clicks: int, conv: int) -> dict:
             "cpa": round(spent / conv, 2) if conv else None}
 
 
+def _ord_status(v):
+    if isinstance(v, dict):
+        return {"status": v.get("status"), "major_status": v.get("major_status"),
+                "codes": [str(c) for c in v.get("codes") or [] if c]}
+    return None if v in (None, "") else str(v)
+
+
+def _reach_frequency(u: dict, shows: int) -> dict:
+    """Охват и частота из uniques. Третий живой прогон: reach 0 при миллионах показов, total и increment без
+    подтверждённого смысла — reach 0 при показах > 0 — «нет данных» (None); частота — только показы / охват,
+    uniques.frequency / total / increment не берём. Нет uniques — None, а не 0."""
+    reach = None if u.get("reach") in (None, "") else int(u["reach"])
+    if reach == 0 and shows > 0:
+        reach = None
+    return {"reach": reach, "frequency": round(shows / reach, 2) if reach else None}
+
+
+def _conversions(b: dict) -> tuple:
+    """(конверсии, взяты ли из goals). «Результат» VK — vk.result (vk.goals ему равен); нет блока vk — base.goals."""
+    vk = b.get("vk")
+    if isinstance(vk, dict):
+        v = next((vk[k] for k in ("result", "goals") if vk.get(k) not in (None, "")), None)
+        if v is not None:
+            return int(v), False
+    goals = int(b.get("goals") or 0)
+    return goals, bool(goals)
+
+
 def stats_from(block, objective) -> dict:
+    """objective оставлен для совместимости: источник конверсий один для всех целей (CONVERSION_SOURCE)."""
     block = block or {}
     b = block.get("base") or {}
     u = block.get("uniques") or {}
     spent = round(money(b.get("spent")), 2)
     shows = int(b.get("shows") or 0)
     clicks = int(b.get("clicks") or 0)
-    if CONVERSION_SOURCE.get(objective or "") == "vk.result":
-        conv = int((b.get("vk") or {}).get("result") or 0)
-    else:
-        conv = int(b.get("goals") or 0)
-    return {"spent": spent, "shows": shows, "clicks": clicks, "conversions": conv,
-            **_ratios(spent, shows, clicks, conv),
-            "vk_ctr_pct": None if b.get("ctr") in (None, "") else round(float(b["ctr"]), 4),   # у VK уже проценты
-            "reach": None if u.get("reach") in (None, "") else int(u["reach"]),   # нет uniques — нет данных, не 0
-            "frequency": float(u.get("frequency") or 0) or None}
+    conv, from_goals = _conversions(b)
+    out = {"spent": spent, "shows": shows, "clicks": clicks, "conversions": conv,
+           "goals_all": int(b.get("goals") or 0),   # все цели пикселя — справочно, правила на них не смотрят
+           **_ratios(spent, shows, clicks, conv),
+           "vk_ctr_pct": None if b.get("ctr") in (None, "") else round(float(b["ctr"]), 4),   # у VK уже проценты
+           **_reach_frequency(u, shows)}
+    if from_goals:
+        out["conversions_from_goals"] = True   # старый ответ без «Результата» VK — заметка в «Ограничениях»
+    return out
 
 
 def aggregate(rows: list) -> dict:
@@ -104,8 +139,12 @@ def aggregate(rows: list) -> dict:
     shows = sum(r["shows"] for r in rows)
     clicks = sum(r["clicks"] for r in rows)
     conv = sum(r["conversions"] for r in rows)
-    return {"spent": spent, "shows": shows, "clicks": clicks, "conversions": conv,
-            **_ratios(spent, shows, clicks, conv), "vk_ctr_pct": None, "reach": None, "frequency": None}
+    out = {"spent": spent, "shows": shows, "clicks": clicks, "conversions": conv,
+           "goals_all": sum(r.get("goals_all") or 0 for r in rows),
+           **_ratios(spent, shows, clicks, conv), "vk_ctr_pct": None, "reach": None, "frequency": None}
+    if any(r.get("conversions_from_goals") for r in rows):
+        out["conversions_from_goals"] = True
+    return out
 
 
 def _canon(v):
@@ -311,14 +350,27 @@ def _account_spent(raw_dir: Path, period: tuple, collect_log):
     return None if v is None or isinstance(v, bool) else round(float(v), 2)
 
 
+def _after(stamp, d_to: date) -> bool:
+    """Дата изменения (updated) позже конца периода: кабинет правили после него."""
+    dt = parse_dt(stamp)
+    return bool(dt and dt.date() > d_to)
+
+
 def _groups_gen(n: int) -> str:
     """«для 1 группы», «для 5 групп»."""
     return f"{n} {plural(n, 'группы', 'групп', 'групп')}"
 
 
+def lists_no_access_call(c: dict) -> bool:
+    """Сбой vk_ads_users_lists_list из-за прав: флаг no_access или code zero_quota в ошибке при любом HTTP-статусе
+    (MCP 0.12.0 — 403; путь A: модель могла не поставить флаг)."""
+    return (c.get("tool") == "vk_ads_users_lists_list" and not c.get("ok", True)
+            and bool(c.get("no_access") or "zero_quota" in str(c.get("error") or "")))
+
+
 def _no_access_to_lists(collect_log) -> bool:
-    return any(c.get("tool") == "vk_ads_users_lists_list" and not c.get("ok", True) and c.get("no_access")
-               and not c.get("recovered") for c in (mark_recovered(collect_log) or {}).get("calls", []))
+    return any(lists_no_access_call(c) and not c.get("recovered")
+               for c in (mark_recovered(collect_log) or {}).get("calls", []))
 
 
 def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, path: str = "B",
@@ -363,11 +415,16 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
     ord_status_blind = _blind_ids(raw_dir, "vk_ads_banners_list", ORD_STATUS_KEYS)
     utm_blind = _blind_ids(raw_dir, "vk_ads_campaigns_list", AUTO_UTM_KEYS)
 
+    raw_plans = _list_items(raw_dir, "vk_ads_ad_plans_list")
+    plan_status = {p.get("id"): p.get("status") for p in raw_plans}
+    plan_changed = {p.get("id"): _after(p.get("updated"), d_to) for p in raw_plans}
     objective_of: dict = {}
     unmeasured_freq: list = []
     groups = []
     for g in raw_groups:
         obj = g.get("objective")
+        target_ids = _segment_ids(g.get("targetings"))
+        layer = layer_info(target_ids, segments_by_id) if "targetings" in g else None
         objective_of[g["id"]] = obj
         daily = [{"date": r.get("date"), **stats_from(r, obj)}
                  for r in (daily_raw.get(g["id"]) or {}).get("rows") or []]
@@ -375,7 +432,7 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
         if g["id"] in daily_ids:  # нет в items при покрытии вызовом — показов не было, это нули
             stats = aggregate(daily)
             sm = stats_from((summary.get(g["id"]) or {}).get("total"), obj) if g["id"] in summary else None
-            if sm and daily and _lifetime_fits(g, d_from, stats, sm):
+            if sm and daily and _lifetime_fits(g, d_from, stats, sm) and sm["reach"] is not None:
                 stats = {**stats, "reach": sm["reach"], "frequency": sm["frequency"]}
             else:
                 unmeasured_freq.append(g["id"])
@@ -387,16 +444,29 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
         group = {
             "id": g["id"], "name": g.get("name") or "", "status": g.get("status"), "objective": obj,
             "package_id": g.get("package_id"), "ad_plan_id": g.get("ad_plan_id"),
+            "plan_status": plan_status.get(g.get("ad_plan_id")),   # кампания остановлена — группа на паузе
             "delivery": g.get("delivery"), "autobidding_mode": g.get("autobidding_mode"),
             "budget_day_rub": _rub(g.get("budget_limit_day")),
             "budget_total_rub": _rub(g.get("budget_limit")),
             "issues": _codes(g.get("issues")), "created": g.get("created"), "date_end": g.get("date_end"),
+            "updated": g.get("updated"),
+            # группу или её кампанию правили после конца периода: статус и бюджет — на дату сбора, не на период
+            "changed_after_period": _after(g.get("updated"), d_to) or plan_changed.get(g.get("ad_plan_id"), False),
             "targeting_key": targeting_key(g.get("targetings")),
-            "segment_ids": _segment_ids(g.get("targetings")),
+            "segment_ids": target_ids,
             "excluded_segment_ids": _segment_ids(g.get("targetings"), excluded=True),
             "stats": stats, "daily": daily,
             "features": targeting_features(g.get("targetings"), observed_t),
-            "layer": layer_of(_segment_ids(g.get("targetings")), segments_by_id) if "targetings" in g else None,
+            "layer": layer["layer"] if layer else None,
+            # слой по догадке «не LAL — тёплый»: тип сегмента по связям (relations) не определён — низкая надёжность
+            "layer_guessed": bool(layer and layer["guessed"]),
+            "layer_subtype": layer["subtype"] if layer else None,   # keywords — холодный слой ключевых фраз
+            # сегменты ключевых фраз в таргетинге: фразы есть, но их параметры (минус-фразы, период) MCP не отдаёт
+            "keyword_segment_ids": [i for i in target_ids if i in segments_by_id
+                                    and is_keyword_segment(segments_by_id[i])],
+            # тип сегмента по связям не определён (нет relations или тип незнакомый): может быть и сегментом фраз
+            "untyped_segment_ids": [i for i in target_ids if i in segments_by_id
+                                    and segment_kind(segments_by_id[i]) is None],
             "max_price_rub": _price(g.get("max_price")),
             "auto_utm": _auto_utm(g, observed_g) if (g["id"] not in utm_blind or isinstance(g.get("utm"), str))
             else None,
@@ -409,9 +479,12 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
 
     banner_out = []
     for b in banners:
+        run_days = None   # дней с показами в периоде; None — дневной статистики объявления нет
         if b["id"] in bdaily:
             obj = objective_of.get(b["_group"])
-            bstats = aggregate([stats_from(r, obj) for r in bdaily[b["id"]].get("rows") or []])
+            brows = [stats_from(r, obj) for r in bdaily[b["id"]].get("rows") or []]
+            bstats = aggregate(brows)
+            run_days = sum(1 for r in brows if r["shows"] > 0)
         elif bdaily_calls == 0 and b["id"] in bsummary:  # только старый raw/ без дней
             bstats = stats_from(bsummary[b["id"]].get("total"), objective_of.get(b["_group"]))
         else:
@@ -421,7 +494,7 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
             "moderation_status": b.get("moderation_status"), "moderation_reasons": b.get("moderation_reasons"),
             "issues": _codes(b.get("issues")),
             "can_remoderate": bool(b.get("user_can_request_remoderation")),
-            "cta": (str(b["call_to_action"]) if b.get("call_to_action") not in (None, "") else None),
+            "cta": banner_cta(b),
             "text": banner_text(b.get("textblocks")),
             "urls": url_strings(b.get("urls")),
             **content_features(b.get("content")),
@@ -429,17 +502,17 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
             "age_days": (d_to - parse_dt(b["created"]).date()).days if parse_dt(b.get("created")) else None,
             "erid": (None if b["id"] in erid_blind or not any(k in observed_b for k in ERID_KEYS)
                      else str(first_known(b, ERID_KEYS, observed_b) or "")),
-            # статус ОРД — только справочно: смысл значений or_status не подтверждён, в проверку A2 не идёт
-            "ord_status": (None if b["id"] in ord_status_blind
-                           or first_known(b, ORD_STATUS_KEYS, observed_b) in (None, "")
-                           else str(first_known(b, ORD_STATUS_KEYS, observed_b))),
-            "stats": bstats,
+            # статус ОРД — только справочно, в проверку A2 не идёт. MCP 0.12.0: объект {"codes", "major_status",
+            # "status"} — храним как есть (подписи — features.ord_status_label), а не repr словаря
+            "ord_status": _ord_status(None if b["id"] in ord_status_blind
+                                      else first_known(b, ORD_STATUS_KEYS, observed_b)),
+            "stats": bstats, "run_days": run_days,
         })
 
     live_groups = [g for g in groups if _is_live(g)]
     counted = [g for g in groups if g["status"] != "deleted"]   # расход архивных групп в итогах остаётся
     if banner_calls:
-        uncovered = [g for g in live_groups if g["status"] == "active" and g["id"] not in banner_groups]
+        uncovered = [g for g in live_groups if is_active_group(g, ("active",)) and g["id"] not in banner_groups]
         if uncovered:
             notes.append(f"Объявления не собраны для {_groups_gen(len(uncovered))} — по ним выводы на уровне группы.")
     absent = [g for g in live_groups if g.get("stats_missing")]
@@ -454,22 +527,25 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
                 notes.append(f"Сумма по объявлениям меньше расхода группы {g['id']} "
                              "(часть объявлений удалена?)")
 
+    if any(g["stats"].get("conversions_from_goals") for g in groups if g["status"] != "deleted") or any(
+            (b["stats"] or {}).get("conversions_from_goals") for b in banner_out):
+        notes.append(CONVERSION_NOTE)
     no_freq = [g for g in live_groups if g["id"] in unmeasured_freq and g["stats"]["shows"] > 0]
     if no_freq:
-        notes.append(f"Частота и охват за период не определены для {_groups_gen(len(no_freq))}: статистика VK отдаёт их "
-                     "только за всё время жизни группы — правила по частоте (выгорание) по ним не применялись.")
+        notes.append(f"Частота и охват за период не определены для {_groups_gen(len(no_freq))}: VK не отдаёт охват за "
+                     "период (сводка — только за всё время жизни группы) — правила по частоте (выгорание) по ним не "
+                     "применялись.")
 
     def named(tool):
         return [{"id": x.get("id"), "name": x.get("name") or ""} for x in _list_items(raw_dir, tool)]
 
-    raw_plans = _list_items(raw_dir, "vk_ads_ad_plans_list")
     observed_p = observed_keys(raw_plans)
     plan_budget_known = any(k in observed_p for k in PLAN_BUDGET_KEYS)
 
     def plan_out(p):
         day, total = _rub(p.get("budget_limit_day")), _rub(p.get("budget_limit"))
         return {"id": p.get("id"), "name": p.get("name") or "", "status": p.get("status"),
-                "budget_day_rub": day, "budget_total_rub": total,
+                "updated": p.get("updated"), "budget_day_rub": day, "budget_total_rub": total,
                 "has_budget": bool(day or total) if plan_budget_known else None}
 
     observed_s = observed_keys(seg_items)
@@ -482,12 +558,12 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
 
     relations_known = any(k in observed_s for k in SEGMENT_RELATION_KEYS)
     if seg_items and not relations_known and not any(k in observed_s for k in SIZE_KEYS):
-        notes.append("MCP не возвращает размер сегментов и связи с базами клиентов — размер LAL-сегментов и "
+        notes.append("VK не отдаёт через API размер сегментов и связи с базами клиентов — размер LAL-сегментов и "
                      "обновление баз клиентов не проверялись.")
     lists_collected = bool(read_calls(raw_dir, "vk_ads_users_lists_list"))
     lists_no_access = _no_access_to_lists(collect_log)
     if lists_no_access:
-        notes.append("Нет доступа к базам клиентов (vk_ads_users_lists_list): проверки, зависящие от баз, "
+        notes.append("Нет доступа к базам клиентов: проверки, зависящие от баз, "
                      "не выполнялись — не хватает прав у подключения.")
     return {
         "period": {"from": date_from, "to": date_to, "days": (d_to - d_from).days + 1},
@@ -505,6 +581,9 @@ def build_dataset(raw_dir: Path, date_from: str, date_to: str, target_cpa=None, 
         "as_of": as_of or datetime.now().isoformat(timespec="minutes"),
         "totals_windows": windows_of([r for g in counted for r in g["daily"]], d_from, d_to),
         "notes": notes,
+        # хотя бы одну кампанию или группу правили после конца периода — отчёт предупредит: статусы и бюджеты на дату сбора
+        "changed_after_period": any(g["changed_after_period"] for g in groups)
+        or any(plan_changed.values()),
         # расход живых групп известен (статистика есть по всем) и равен 0 — отчёт с плашкой; архивные не в счёт
         "zero_spend": bool(live_groups and has_stats and not absent
                            and aggregate([g["stats"] for g in live_groups])["spent"] == 0),
