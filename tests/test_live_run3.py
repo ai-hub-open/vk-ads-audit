@@ -427,15 +427,16 @@ def test_cta_from_textblocks_and_not_in_ad_text(tmp_path):
     assert by[11]["text"] == "Витамины для всей семьи"                               # код кнопки — не текст
 
 
-def test_learn_more_is_generic_visit_site_and_order_are_not():
-    assert "learnMore" in TH["generic_cta"]
-    assert not {"visitSite", "order"} & set(TH["generic_cta"])
+def test_learn_more_and_visit_site_are_generic_order_is_not():
+    # решение методиста 19.10.2026: «Перейти на сайт» — общая кнопка, «Заказать» — конкретное действие
+    assert {"learnMore", "visitSite"} <= set(TH["generic_cta"])
+    assert "order" not in TH["generic_cta"]
     bs = [make_banner(11, 1, cta="learnMore"), make_banner(12, 1, cta="visitSite"), make_banner(13, 1, cta="order")]
     ds = make_ds([make_group(1)], bs)
     f = found(ds, "generic_button")
-    assert len(f) == 1 and f[0]["evidence"]["banners"] == [11]
+    assert len(f) == 1 and sorted(f[0]["evidence"]["banners"]) == [11, 12]
     assert row(checklist(ds), "E7")["status"] == "fail"
-    ok = make_ds([make_group(1)], bs[1:])
+    ok = make_ds([make_group(1)], bs[2:])
     assert row(checklist(ok), "E7")["status"] == "pass"
 
 
@@ -842,3 +843,22 @@ def test_cpa_tile_not_mixed_across_objectives():
     one = make_ds([make_group(1, stats=stats(1000, 10000, 100, 10))], totals=stats(1000, 10000, 100, 10))
     h1 = render(one, {**res(one), "checklist": checklist(one)}).split("Чек-лист")[0]
     assert "CPA<b>100 ₽</b>" in h1 and "CPA по целям" not in h1
+
+
+# ---- C5: решение методиста 19.10.2026 — только пиксель / база / LAL, не сегменты фраз ----
+
+def test_c5_keyword_segments_are_not_custom_audiences():
+    g = make_group(1, layer="cold", layer_subtype="keywords", segment_ids=[3], keyword_segment_ids=[3],
+                   untyped_segment_ids=[])
+    assert row(checklist(make_ds([g], [])), "C5")["status"] == "fail"
+
+
+def test_c5_pixel_or_base_segment_passes():
+    g = make_group(1, layer="warm", segment_ids=[3, 4], keyword_segment_ids=[3], untyped_segment_ids=[])
+    assert row(checklist(make_ds([g], [])), "C5")["status"] == "pass"
+
+
+def test_c5_untyped_segment_is_unknown_not_pass():
+    g = make_group(1, segment_ids=[6], untyped_segment_ids=[6], layer="warm", layer_guessed=True)
+    r = row(checklist(make_ds([g], [])), "C5")
+    assert r["status"] == "unknown" and "тип сегментов" in r["reason"]

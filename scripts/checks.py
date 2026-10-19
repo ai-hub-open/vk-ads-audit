@@ -46,6 +46,13 @@ def _known_banner(banners, field, label):
     return OK if any(b.get(field) not in (None, [], "") for b in banners) else _unknown(label)
 
 
+def _untyped_ids(g):
+    """Сегменты группы, тип которых по связям не определён (нет relations или тип незнакомый)."""
+    if "untyped_segment_ids" in g:
+        return g.get("untyped_segment_ids") or []
+    return g["segment_ids"] if g.get("layer_guessed") else []
+
+
 def _first(*gates):
     """Первый сработавший гейт (статус не None) или OK."""
     return next((g for g in gates if g[0]), OK)
@@ -186,14 +193,21 @@ def run_checks(ds: dict, th: dict, findings: list, evaluated: dict | None = None
     present("C3", "Интересы и поведение", any(_feat(g).get("has_interests") for g in live), targeting_gate)
     present("C4", "Сообщества", any(_feat(g).get("has_communities") for g in live),
             _first(no_active, _known_feature(live, "has_communities", "сообщества")))
-    present("C5", "Пользовательские аудитории", any(g["segment_ids"] for g in live), targeting_gate)
+    # Решение методиста 19.10.2026: C5 — аудитории на своих данных (пиксель, база, LAL). Сегменты ключевых фраз
+    # сюда не идут — их судят C6–C9; сегмент неизвестного типа подтвердить нечем — «нет данных», а не ✅/❌.
+    def _custom_ids(g):
+        skip = set(g.get("keyword_segment_ids") or []) | set(_untyped_ids(g))
+        return [i for i in g["segment_ids"] if i not in skip]
+    has_custom = any(_custom_ids(g) for g in live)
+    c5_untyped = ("unknown", "тип сегментов в таргетинге не определён — пользовательские ли это аудитории, "
+                  "не известно") if not has_custom and any(_untyped_ids(g) for g in live) else OK
+    present("C5", "Пользовательские аудитории", has_custom, _first(targeting_gate, c5_untyped))
     kw = [g for g in live if _feat(g).get("has_keywords")]
     # Третий живой прогон: фразы стоят в таргетинге сегментом (relation remarketing_search_phrases), их параметры
     # (минус-фразы, период, расширение) хранятся в сегменте и через API не приходят — C7–C9 «нет данных», не ❌.
     kw_seg = [g for g in live if g.get("keyword_segment_ids")]
     # ревью: сегмент неизвестного типа (связей нет) может оказаться сегментом фраз — «не используются» не утверждаем
-    untyped = any((g.get("untyped_segment_ids") if "untyped_segment_ids" in g
-                   else (g["segment_ids"] if g.get("layer_guessed") else [])) for g in live)
+    untyped = any(_untyped_ids(g) for g in live)
     untyped_gate = ("unknown", "тип сегментов в таргетинге не определён — используются ли ключевые фразы через "
                     "сегменты, не известно") if untyped else OK
     if kw_seg and not kw and not no_active[0]:
