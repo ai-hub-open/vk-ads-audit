@@ -94,7 +94,7 @@ EVIDENCE_LABELS = {
     "ctr_second_half_pct": "CTR второй половины периода", "spent_7d": "расход за 7 дней", "cpa_7d": "CPA за 7 дней",
     "cpa_30d": "CPA за 30 дней", "conversions_30d": "конверсии за 30 дней", "conversions_7d": "конверсии за 7 дней",
     "conversions_per_week": "конверсий в неделю", "needed": "нужно", "avg_daily_spent": "средний расход в день",
-    "budget_day_rub": "дневной бюджет", "minimum_rub": "минимум", "needed_rub": "нужно в день",
+    "budget_day_rub": "дневной бюджет", "minimum_rub": "минимум", "needed_rub": "ориентир в день",
     "recommended_rub": "рекомендуется", "budget_max_rub": "бюджет до", "small_groups": "мелких групп",
     "max_price_rub": "предельная цена", "month_spend_rub": "расход в пересчёте на месяц",
     "banners_total": "объявлений всего", "banners_active": "активных объявлений", "active_banners": "активных объявлений",
