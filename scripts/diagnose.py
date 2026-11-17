@@ -341,10 +341,15 @@ def low_budget(ds, th, ctx):
         elif _is_auto(g, th) and _ref(ctx, g)[0] is not None and \
                 b < _ref(ctx, g)[0] * th["learning_budget_cpa_multiplier"]:
             need = _ref(ctx, g)[0] * th["learning_budget_cpa_multiplier"]
+            # Ориентир «множитель × CPA» — практическое правило методики, не требование VK: агент запуска
+            # выдал его за обязательный минимум и предлагал поднять бюджет сверх лимита клиента (06.11.2026).
             out.append(finding("low_budget", "orange", "group", g,
-                               "Бюджета не хватает на обучение автостратегии",
+                               "Бюджета может не хватать на обучение автостратегии",
                                {"budget_day_rub": b, "needed_rub": need, "ref_source": _ref(ctx, g)[1]},
-                               f"Дневной бюджет не ниже {need:.0f} ₽ (≥ {th['learning_budget_cpa_multiplier']} × CPA)"))
+                               f"Ориентир — от {need:.0f} ₽ в день ({th['learning_budget_cpa_multiplier']} × CPA): "
+                               "с меньшим бюджетом автостратегия копит конверсии дольше. Это практическое "
+                               "правило, а не требование VK, и рост результата оно не гарантирует; если бюджет "
+                               "ограничен — сократить число групп, а не поднимать бюджет"))
         elif b < th["recommended_daily_budget_rub"]:
             out.append(finding("low_budget", "white", "group", g, "Дневной бюджет на нижней границе",
                                {"budget_day_rub": b, "recommended_rub": th["recommended_daily_budget_rub"]},
@@ -477,8 +482,31 @@ def no_retargeting(ds, th, ctx):
     if any(_layer(g) == "warm" for g in live):
         return []
     return [finding("no_retargeting", "white", "account", ACCOUNT, "В кабинете нет ретаргетинга",
-                    {"active_groups": len(live)},
-                    "Добавить группы на посетителей сайта, вовлечённых в сообщество и досмотревших видео")]
+                    {"active_groups": len(live)}, _retargeting_action(ds, th, live))]
+
+
+def _retargeting_action(ds, th, live) -> str:
+    """Только источники ретаргетинга, которые есть в VK Рекламе, — с оговоркой, есть ли они у клиента.
+
+    Сессия 06.11.2026: совет «вовлечённые в сообщество и досмотревшие видео» агент запуска превратил
+    в шаги интерфейса, которых в кабинете нет. Источник называем по данным кабинета, а не списком на всё.
+    """
+    parts = []
+    if ds["coverage"].get("pixels"):
+        if ds["pixels"]:
+            parts.append("посетителей сайта по пикселю")
+    else:
+        parts.append("посетителей сайта, если в кабинете есть пиксель")
+    community = set(th["funnel_objectives"]["subscription"])
+    if any(g.get("objective") in community for g in live):
+        parts.append("подписчиков своего сообщества")
+    else:
+        parts.append("подписчиков своего сообщества, если оно есть")
+    if ds.get("users_lists"):
+        parts.append("загруженную базу клиентов")
+    else:
+        parts.append("базу клиентов (телефоны, email), если клиент готов её загрузить")
+    return "Добавить группу ретаргетинга: " + "; ".join(parts)
 
 
 @rule
